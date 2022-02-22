@@ -14,7 +14,9 @@
 
 package file
 
-import "github.com/conduitio/conduit/pkg/foundation/cerrors"
+import (
+	"fmt"
+)
 
 const (
 	// ConfigPath is the config name for the path to the file.
@@ -22,5 +24,5 @@ const (
 )
 
 func requiredConfigErr(name string) error {
-	return cerrors.Errorf("%q config value must be set", name)
+	return fmt.Errorf("%q config value must be set", name)
 }
