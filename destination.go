@@ -17,10 +17,10 @@ package file
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 
-	"github.com/conduitio/conduit/pkg/foundation/cerrors"
-	"github.com/conduitio/conduit/pkg/plugin/sdk"
+	sdk "github.com/conduitio/connector-plugin-sdk"
 )
 
 // Destination connector
@@ -104,7 +104,7 @@ func (d *Destination) validateConfig(cfg map[string]string) error {
 	// make sure we can stat the file, we don't care if it doesn't exist though
 	_, err := os.Stat(path)
 	if err != nil && !os.IsNotExist(err) {
-		return cerrors.Errorf(
+		return fmt.Errorf(
 			"%q config value %q does not contain a valid path: %w",
 			ConfigPath, path, err,
 		)

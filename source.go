@@ -21,8 +21,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/conduitio/conduit/pkg/foundation/cerrors"
-	"github.com/conduitio/conduit/pkg/plugin/sdk"
+	sdk "github.com/conduitio/connector-plugin-sdk"
 	"github.com/nxadm/tail"
 )
 
@@ -81,7 +80,7 @@ func (s *Source) seek(p sdk.Position) error {
 		var err error
 		offset, err = strconv.ParseInt(string(p), 10, 64)
 		if err != nil {
-			return cerrors.Errorf("invalid position %v, expected a number", p)
+			return fmt.Errorf("invalid position %v, expected a number", p)
 		}
 	}
 
@@ -99,7 +98,7 @@ func (s *Source) seek(p sdk.Position) error {
 		},
 	)
 	if err != nil {
-		return cerrors.Errorf("could not tail file: %w", err)
+		return fmt.Errorf("could not tail file: %w", err)
 	}
 
 	s.tail = t
@@ -115,7 +114,7 @@ func (s *Source) validateConfig(cfg map[string]string) error {
 	// make sure we can stat the file, we don't care if it doesn't exist though
 	_, err := os.Stat(path)
 	if err != nil && !os.IsNotExist(err) {
-		return cerrors.Errorf(
+		return fmt.Errorf(
 			"%q config value %q does not contain a valid path: %w",
 			ConfigPath, path, err,
 		)

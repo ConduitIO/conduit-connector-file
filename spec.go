@@ -15,7 +15,7 @@
 package file
 
 import (
-	"github.com/conduitio/conduit/pkg/plugin/sdk"
+	sdk "github.com/conduitio/connector-plugin-sdk"
 )
 
 func Specification() sdk.Specification {

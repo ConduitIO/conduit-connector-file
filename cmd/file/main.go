@@ -15,8 +15,8 @@
 package main
 
 import (
-	"github.com/conduitio/conduit/pkg/plugin/sdk"
-	"github.com/conduitio/conduit/pkg/plugins/file"
+	file "github.com/conduitio/conduit-plugin-file"
+	sdk "github.com/conduitio/connector-plugin-sdk"
 )
 
 func main() {
