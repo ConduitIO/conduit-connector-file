@@ -22,7 +22,7 @@ func Specification() sdk.Specification {
 	return sdk.Specification{
 		Name:    "file",
 		Summary: "A file source and destination plugin for Conduit, written in Go.",
-		Version: "v0.0.1",
+		Version: "v0.1.0",
 		Author:  "Meroxa, Inc.",
 		DestinationParams: map[string]sdk.Parameter{
 			"path": {
