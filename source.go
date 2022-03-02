@@ -21,7 +21,7 @@ import (
 	"os"
 	"strconv"
 
-	sdk "github.com/conduitio/conduit-plugin-sdk"
+	sdk "github.com/conduitio/conduit-connector-sdk"
 	"github.com/nxadm/tail"
 )
 
