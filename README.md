@@ -1,3 +1,5 @@
+# Conduit Connector File
+
 ### General
 The File plugin is one of [Conduit](https://github.com/ConduitIO/conduit) builtin plugins.
 It provides both source and destination File connectors, allowing for a file to be either
