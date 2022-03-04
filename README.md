@@ -4,7 +4,7 @@ It provides both source and destination File connectors, allowing for a file to 
 a source, or a destination in a Conduit pipeline.
 
 ### How to build it
-Run `make build`.
+Run `make`.
 
 ### Testing
 Run `make test` to run all the tests.
