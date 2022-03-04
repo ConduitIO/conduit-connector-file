@@ -1,7 +1,13 @@
-### Overview
-The Conduit File plugin provides both source and destination connectors,
-allowing for a file to be either a source or a destination in a Conduit
-pipeline.
+### General
+The File plugin is one of [Conduit](https://github.com/ConduitIO/conduit) builtin plugins.
+It provides both source and destination File connectors, allowing for a file to be either
+a source, or a destination in a Conduit pipeline.
+
+### How to build it
+Run `make build`.
+
+### Testing
+Run `make test` to run all the tests.
 
 ### How it works
 The Source connector listens for changes appended to the source file and 
@@ -16,9 +22,6 @@ name is there, then it will start listening to changes and sending records.
 #### Destination
 The Destination connector will create the file if it doesn't exist, and 
 records with changes will be appended to the destination file when received.
-
-### How to build it
-Run `make build-file-plugin`.
 
 ### Configuration
 
