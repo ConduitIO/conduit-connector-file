@@ -56,13 +56,12 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 		if !ok {
 			return sdk.Record{}, s.tail.Err()
 		}
-		return sdk.Record{
-			Position:  sdk.Position(strconv.FormatInt(line.SeekInfo.Offset, 10)),
-			Operation: sdk.OperationCreate,
-			Payload: sdk.Change{
-				After: sdk.RawData(line.Text),
-			},
-		}, nil
+		return s.Util.NewRecordCreate(
+			sdk.Position(strconv.FormatInt(line.SeekInfo.Offset, 10)),
+			nil,
+			nil,
+			sdk.RawData(line.Text),
+		), nil
 	case <-ctx.Done():
 		return sdk.Record{}, ctx.Err()
 	}
