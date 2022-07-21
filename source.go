@@ -25,6 +25,8 @@ import (
 	"github.com/nxadm/tail"
 )
 
+const MetadataFilePath = "file.path"
+
 // Source connector
 type Source struct {
 	sdk.UnimplementedSource
@@ -58,9 +60,11 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 		}
 		return s.Util.NewRecordCreate(
 			sdk.Position(strconv.FormatInt(line.SeekInfo.Offset, 10)),
-			nil,
-			nil,
-			sdk.RawData(line.Text),
+			map[string]string{
+				MetadataFilePath: s.config[ConfigPath],
+			},
+			sdk.RawData(strconv.Itoa(line.Num)), // use line number as key
+			sdk.RawData(line.Text),              // use line content as payload
 		), nil
 	case <-ctx.Done():
 		return sdk.Record{}, ctx.Err()
