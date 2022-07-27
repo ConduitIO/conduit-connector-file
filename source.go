@@ -58,7 +58,7 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 		if !ok {
 			return sdk.Record{}, s.tail.Err()
 		}
-		return s.Util.NewRecordCreate(
+		return sdk.Util.Source.NewRecordCreate(
 			sdk.Position(strconv.FormatInt(line.SeekInfo.Offset, 10)),
 			map[string]string{
 				MetadataFilePath: s.config[ConfigPath],
