@@ -21,7 +21,11 @@ import (
 func Specification() sdk.Specification {
 	return sdk.Specification{
 		Name:    "file",
-		Summary: "A file source and destination plugin for Conduit, written in Go.",
+		Summary: "A file source and destination plugin for Conduit.",
+		Description: `The file source allows you to listen to a local file and
+detect any changes happening to it. Each change will create a new record. The
+destination allows you to write record payloads to a destination file, each new
+record payload is appended to the file in a new line.`,
 		Version: "v0.1.0",
 		Author:  "Meroxa, Inc.",
 		DestinationParams: map[string]sdk.Parameter{
