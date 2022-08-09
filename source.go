@@ -39,6 +39,16 @@ func NewSource() sdk.Source {
 	return &Source{}
 }
 
+func (s *Source) Parameters() map[string]sdk.Parameter {
+	return map[string]sdk.Parameter{
+		"path": {
+			Default:     "",
+			Description: "the file path from which the file source reads messages",
+			Required:    true,
+		},
+	}
+}
+
 func (s *Source) Configure(ctx context.Context, m map[string]string) error {
 	err := s.validateConfig(m)
 	if err != nil {

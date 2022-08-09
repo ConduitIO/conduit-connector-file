@@ -28,19 +28,5 @@ destination allows you to write record payloads to a destination file, each new
 record payload is appended to the file in a new line.`,
 		Version: "v0.1.0",
 		Author:  "Meroxa, Inc.",
-		DestinationParams: map[string]sdk.Parameter{
-			"path": {
-				Default:     "",
-				Description: "the file path where the file destination writes messages",
-				Required:    true,
-			},
-		},
-		SourceParams: map[string]sdk.Parameter{
-			"path": {
-				Default:     "",
-				Description: "the file path from which the file source reads messages",
-				Required:    true,
-			},
-		},
 	}
 }
