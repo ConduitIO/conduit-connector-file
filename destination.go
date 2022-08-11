@@ -34,7 +34,7 @@ type Destination struct {
 }
 
 func NewDestination() sdk.Destination {
-	return sdk.DestinationWithMiddleware(&Destination{}, sdk.DefaultDestinationMiddleware...)
+	return sdk.DestinationWithMiddleware(&Destination{}, sdk.DefaultDestinationMiddleware()...)
 }
 
 func (d *Destination) Parameters() map[string]sdk.Parameter {
