@@ -15,7 +15,7 @@
 package file
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -29,12 +29,22 @@ type Destination struct {
 
 	config map[string]string
 
-	scanner *bufio.Scanner
-	file    *os.File
+	buf  bytes.Buffer
+	file *os.File
 }
 
 func NewDestination() sdk.Destination {
-	return &Destination{}
+	return sdk.DestinationWithMiddleware(&Destination{}, sdk.DefaultDestinationMiddleware()...)
+}
+
+func (d *Destination) Parameters() map[string]sdk.Parameter {
+	return map[string]sdk.Parameter{
+		"path": {
+			Default:     "",
+			Description: "the file path where the file destination writes messages",
+			Required:    true,
+		},
+	}
 }
 
 func (d *Destination) Configure(ctx context.Context, m map[string]string) error {
@@ -52,18 +62,21 @@ func (d *Destination) Open(ctx context.Context) error {
 		return err
 	}
 
-	d.scanner = bufio.NewScanner(file)
 	d.file = file
 	return nil
 }
 
-func (d *Destination) Write(ctx context.Context, r sdk.Record) error {
-	_, err := d.file.Write(append(r.Bytes(), byte('\n')))
-	return err
-}
-
-func (d *Destination) Flush(ctx context.Context) error {
-	return d.file.Sync()
+func (d *Destination) Write(ctx context.Context, recs []sdk.Record) (int, error) {
+	defer d.buf.Reset() // always reset buffer after write
+	for _, r := range recs {
+		d.buf.Write(r.Bytes())
+		d.buf.WriteRune('\n')
+	}
+	_, err := d.buf.WriteTo(d.file)
+	if err != nil {
+		return 0, err
+	}
+	return len(recs), nil
 }
 
 func (d *Destination) Teardown(ctx context.Context) error {
@@ -81,7 +94,7 @@ func (d *Destination) openOrCreate(path string) (*os.File, error) {
 			return nil, err
 		}
 
-		return file, err
+		return file, nil
 	}
 	if err != nil {
 		return nil, err
