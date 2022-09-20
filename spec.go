@@ -18,6 +18,11 @@ import (
 	sdk "github.com/conduitio/conduit-connector-sdk"
 )
 
+// version is set during the build process (i.e. the Makefile).
+// It follows Go's convention for module version, where the version
+// starts with the letter v, followed by a semantic version.
+var version = "dev"
+
 func Specification() sdk.Specification {
 	return sdk.Specification{
 		Name:    "file",
@@ -26,7 +31,7 @@ func Specification() sdk.Specification {
 detect any changes happening to it. Each change will create a new record. The
 destination allows you to write record payloads to a destination file, each new
 record payload is appended to the file in a new line.`,
-		Version: "v0.1.0",
+		Version: version,
 		Author:  "Meroxa, Inc.",
 	}
 }
