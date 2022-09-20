@@ -59,7 +59,7 @@ func (s *Source) Configure(ctx context.Context, m map[string]string) error {
 }
 
 func (s *Source) Open(ctx context.Context, position sdk.Position) error {
-	return s.seek(position)
+	return s.seek(ctx, position)
 }
 
 func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
@@ -92,7 +92,7 @@ func (s *Source) Teardown(ctx context.Context) error {
 	return nil
 }
 
-func (s *Source) seek(p sdk.Position) error {
+func (s *Source) seek(ctx context.Context, p sdk.Position) error {
 	var offset int64
 	if p != nil {
 		var err error
@@ -102,7 +102,9 @@ func (s *Source) seek(p sdk.Position) error {
 		}
 	}
 
-	fmt.Printf("seeking to position %d\n", offset)
+	sdk.Logger(ctx).Info().
+		Int64("position", offset).
+		Msgf("seeking...")
 
 	t, err := tail.TailFile(
 		s.config[ConfigPath],
