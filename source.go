@@ -25,6 +25,8 @@ import (
 	"github.com/nxadm/tail"
 )
 
+const MetadataFilePath = "file.path"
+
 // Source connector
 type Source struct {
 	sdk.UnimplementedSource
@@ -34,7 +36,17 @@ type Source struct {
 }
 
 func NewSource() sdk.Source {
-	return &Source{}
+	return sdk.SourceWithMiddleware(&Source{}, sdk.DefaultSourceMiddleware()...)
+}
+
+func (s *Source) Parameters() map[string]sdk.Parameter {
+	return map[string]sdk.Parameter{
+		"path": {
+			Default:     "",
+			Description: "the file path from which the file source reads messages",
+			Required:    true,
+		},
+	}
 }
 
 func (s *Source) Configure(ctx context.Context, m map[string]string) error {
@@ -47,17 +59,23 @@ func (s *Source) Configure(ctx context.Context, m map[string]string) error {
 }
 
 func (s *Source) Open(ctx context.Context, position sdk.Position) error {
-	return s.seek(position)
+	return s.seek(ctx, position)
 }
 
 func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 	select {
-	case line := <-s.tail.Lines:
-		return sdk.Record{
-			Position:  sdk.Position(strconv.FormatInt(line.SeekInfo.Offset, 10)),
-			CreatedAt: line.Time,
-			Payload:   sdk.RawData(line.Text),
-		}, nil
+	case line, ok := <-s.tail.Lines:
+		if !ok {
+			return sdk.Record{}, s.tail.Err()
+		}
+		return sdk.Util.Source.NewRecordCreate(
+			sdk.Position(strconv.FormatInt(line.SeekInfo.Offset, 10)),
+			map[string]string{
+				MetadataFilePath: s.config[ConfigPath],
+			},
+			sdk.RawData(strconv.Itoa(line.Num)), // use line number as key
+			sdk.RawData(line.Text),              // use line content as payload
+		), nil
 	case <-ctx.Done():
 		return sdk.Record{}, ctx.Err()
 	}
@@ -74,7 +92,7 @@ func (s *Source) Teardown(ctx context.Context) error {
 	return nil
 }
 
-func (s *Source) seek(p sdk.Position) error {
+func (s *Source) seek(ctx context.Context, p sdk.Position) error {
 	var offset int64
 	if p != nil {
 		var err error
@@ -84,7 +102,9 @@ func (s *Source) seek(p sdk.Position) error {
 		}
 	}
 
-	fmt.Printf("seeking to position %d\n", offset)
+	sdk.Logger(ctx).Info().
+		Int64("position", offset).
+		Msgf("seeking...")
 
 	t, err := tail.TailFile(
 		s.config[ConfigPath],

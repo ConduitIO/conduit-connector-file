@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package file
 
-import (
-	file "github.com/conduitio/conduit-connector-file"
-	sdk "github.com/conduitio/conduit-connector-sdk"
-)
+import sdk "github.com/conduitio/conduit-connector-sdk"
 
-func main() {
-	sdk.Serve(file.Specification, file.NewSource, file.NewDestination)
+var Connector = sdk.Connector{
+	NewSpecification: Specification,
+	NewSource:        NewSource,
+	NewDestination:   NewDestination,
 }

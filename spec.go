@@ -18,25 +18,20 @@ import (
 	sdk "github.com/conduitio/conduit-connector-sdk"
 )
 
+// version is set during the build process (i.e. the Makefile).
+// It follows Go's convention for module version, where the version
+// starts with the letter v, followed by a semantic version.
+var version = "v0.3.0"
+
 func Specification() sdk.Specification {
 	return sdk.Specification{
 		Name:    "file",
-		Summary: "A file source and destination plugin for Conduit, written in Go.",
-		Version: "v0.1.0",
+		Summary: "A file source and destination plugin for Conduit.",
+		Description: `The file source allows you to listen to a local file and
+detect any changes happening to it. Each change will create a new record. The
+destination allows you to write record payloads to a destination file, each new
+record payload is appended to the file in a new line.`,
+		Version: version,
 		Author:  "Meroxa, Inc.",
-		DestinationParams: map[string]sdk.Parameter{
-			"path": {
-				Default:     "",
-				Description: "the file path where the file destination writes messages",
-				Required:    true,
-			},
-		},
-		SourceParams: map[string]sdk.Parameter{
-			"path": {
-				Default:     "",
-				Description: "the file path from which the file source reads messages",
-				Required:    true,
-			},
-		},
 	}
 }
