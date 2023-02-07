@@ -3,7 +3,7 @@ module github.com/conduitio/conduit-connector-file
 go 1.18
 
 require (
-	github.com/conduitio/conduit-connector-sdk v0.5.0
+	github.com/conduitio/conduit-connector-sdk v0.5.1-0.20230207135018-5d2f0ee2d824
 	github.com/nxadm/tail v1.4.8
 	go.uber.org/goleak v1.2.0
 )
