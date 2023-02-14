@@ -5,7 +5,7 @@ go 1.18
 require (
 	github.com/conduitio/conduit-connector-sdk v0.5.0
 	github.com/nxadm/tail v1.4.8
-	go.uber.org/goleak v1.2.0
+	go.uber.org/goleak v1.2.1
 )
 
 require (
