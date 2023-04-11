@@ -3,7 +3,7 @@ module github.com/conduitio/conduit-connector-file
 go 1.20
 
 require (
-	github.com/conduitio/conduit-connector-sdk v0.5.2
+	github.com/conduitio/conduit-connector-sdk v0.6.0
 	github.com/nxadm/tail v1.4.8
 	go.uber.org/goleak v1.2.1
 )
@@ -12,7 +12,7 @@ require (
 	github.com/Masterminds/goutils v1.1.1 // indirect
 	github.com/Masterminds/semver/v3 v3.2.0 // indirect
 	github.com/Masterminds/sprig/v3 v3.2.3 // indirect
-	github.com/conduitio/conduit-connector-protocol v0.4.1 // indirect
+	github.com/conduitio/conduit-connector-protocol v0.5.0 // indirect
 	github.com/fatih/color v1.14.1 // indirect
 	github.com/fsnotify/fsnotify v1.5.1 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
@@ -35,7 +35,7 @@ require (
 	github.com/rs/zerolog v1.29.0 // indirect
 	github.com/shopspring/decimal v1.3.1 // indirect
 	github.com/spf13/cast v1.5.0 // indirect
-	go.uber.org/multierr v1.10.0 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.5.0 // indirect
 	golang.org/x/exp v0.0.0-20230131160201-f062dba9d201 // indirect
 	golang.org/x/net v0.7.0 // indirect
