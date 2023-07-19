@@ -3,7 +3,7 @@ module github.com/conduitio/conduit-connector-file
 go 1.20
 
 require (
-	github.com/conduitio/conduit-connector-sdk v0.6.0
+	github.com/conduitio/conduit-connector-sdk v0.7.0
 	github.com/nxadm/tail v1.4.8
 	go.uber.org/goleak v1.2.1
 )
@@ -32,7 +32,7 @@ require (
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/oklog/run v1.1.0 // indirect
-	github.com/rs/zerolog v1.29.0 // indirect
+	github.com/rs/zerolog v1.29.1 // indirect
 	github.com/shopspring/decimal v1.3.1 // indirect
 	github.com/spf13/cast v1.5.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
