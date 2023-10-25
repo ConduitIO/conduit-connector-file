@@ -4,7 +4,7 @@ go 1.20
 
 require (
 	github.com/conduitio/conduit-connector-sdk v0.7.2
-	github.com/nxadm/tail v1.4.8
+	github.com/nxadm/tail v1.4.11
 	go.uber.org/goleak v1.3.0
 )
 
@@ -14,7 +14,7 @@ require (
 	github.com/Masterminds/sprig/v3 v3.2.3 // indirect
 	github.com/conduitio/conduit-connector-protocol v0.5.0 // indirect
 	github.com/fatih/color v1.14.1 // indirect
-	github.com/fsnotify/fsnotify v1.5.1 // indirect
+	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/hashicorp/go-hclog v1.4.0 // indirect
