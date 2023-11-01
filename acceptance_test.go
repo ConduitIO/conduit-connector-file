@@ -49,6 +49,7 @@ func TestAcceptance(t *testing.T) {
 				// tail will initialize a InotifyTracker and keep it running
 				// forever as a shared instance, both goroutines belong to it
 				goleak.IgnoreTopFunction("github.com/nxadm/tail/watch.(*InotifyTracker).run"),
+				goleak.IgnoreAnyFunction("github.com/fsnotify/fsnotify.(*Watcher).readEvents"),
 				goleak.IgnoreTopFunction("syscall.Syscall6"), // linux
 				goleak.IgnoreTopFunction("syscall.syscall6"), // darwin
 			},
