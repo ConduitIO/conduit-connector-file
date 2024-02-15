@@ -29,7 +29,6 @@ import (
 
 const MetadataFilePath = "file.path"
 
-// Source connector
 type Source struct {
 	sdk.UnimplementedSource
 
