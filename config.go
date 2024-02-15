@@ -16,13 +16,19 @@ package file
 
 import (
 	"fmt"
+	"os"
 )
 
-const (
-	// ConfigPath is the config name for the path to the file.
-	ConfigPath = "path"
-)
+type Config struct {
+	// Path is the file path used by the connector to read/write records.
+	Path string `json:"path" validate:"required"`
+}
 
-func requiredConfigErr(name string) error {
-	return fmt.Errorf("%q config value must be set", name)
+func (c Config) Validate() error {
+	// make sure we can stat the file, we don't care if it doesn't exist though
+	_, err := os.Stat(c.Path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf(`config value "path" does not contain a valid path: %w`, err)
+	}
+	return nil
 }
