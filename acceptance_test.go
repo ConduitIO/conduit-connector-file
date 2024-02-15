@@ -53,6 +53,9 @@ func TestAcceptance(t *testing.T) {
 				goleak.IgnoreTopFunction("syscall.Syscall6"), // linux
 				goleak.IgnoreTopFunction("syscall.syscall6"), // darwin
 			},
+			Skip: []string{
+				"Configure_RequiredParams", // outdated test, this is matched by the SDK
+			},
 		},
 	})
 }

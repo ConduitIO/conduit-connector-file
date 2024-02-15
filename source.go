@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:generate paramgen -output source_paramgen.go SourceConfig
+
 package file
 
 import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 
+	"github.com/conduitio/conduit-commons/config"
 	sdk "github.com/conduitio/conduit-connector-sdk"
 	"github.com/nxadm/tail"
 )
@@ -31,30 +33,33 @@ const MetadataFilePath = "file.path"
 type Source struct {
 	sdk.UnimplementedSource
 
+	config SourceConfig
 	tail   *tail.Tail
-	config map[string]string
 }
+
+type SourceConfig struct {
+	Config // embed the global config
+}
+
+func (c SourceConfig) Validate() error { return c.Config.Validate() }
 
 func NewSource() sdk.Source {
 	return sdk.SourceWithMiddleware(&Source{}, sdk.DefaultSourceMiddleware()...)
 }
 
-func (s *Source) Parameters() map[string]sdk.Parameter {
-	return map[string]sdk.Parameter{
-		"path": {
-			Default:     "",
-			Description: "the file path from which the file source reads messages",
-			Required:    true,
-		},
-	}
+func (s *Source) Parameters() config.Parameters {
+	return s.config.Parameters()
 }
 
-func (s *Source) Configure(_ context.Context, m map[string]string) error {
-	err := s.validateConfig(m)
+func (s *Source) Configure(_ context.Context, cfg map[string]string) error {
+	err := sdk.Util.ParseConfig(cfg, &s.config)
 	if err != nil {
 		return err
 	}
-	s.config = m
+	err = s.config.Validate()
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -71,7 +76,7 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 		return sdk.Util.Source.NewRecordCreate(
 			sdk.Position(strconv.FormatInt(line.SeekInfo.Offset, 10)),
 			map[string]string{
-				MetadataFilePath: s.config[ConfigPath],
+				MetadataFilePath: s.config.Path,
 			},
 			sdk.RawData(strconv.Itoa(line.Num)), // use line number as key
 			sdk.RawData(line.Text),              // use line content as payload
@@ -107,7 +112,7 @@ func (s *Source) seek(ctx context.Context, p sdk.Position) error {
 		Msgf("seeking...")
 
 	t, err := tail.TailFile(
-		s.config[ConfigPath],
+		s.config.Path,
 		tail.Config{
 			Follow: true,
 			Location: &tail.SeekInfo{
@@ -122,23 +127,5 @@ func (s *Source) seek(ctx context.Context, p sdk.Position) error {
 	}
 
 	s.tail = t
-	return nil
-}
-
-func (s *Source) validateConfig(cfg map[string]string) error {
-	path, ok := cfg[ConfigPath]
-	if !ok {
-		return requiredConfigErr(ConfigPath)
-	}
-
-	// make sure we can stat the file, we don't care if it doesn't exist though
-	_, err := os.Stat(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf(
-			"%q config value %q does not contain a valid path: %w",
-			ConfigPath, path, err,
-		)
-	}
-
 	return nil
 }
