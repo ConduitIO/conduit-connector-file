@@ -24,7 +24,6 @@ import (
 	sdk "github.com/conduitio/conduit-connector-sdk"
 )
 
-// Destination connector
 type Destination struct {
 	sdk.UnimplementedDestination
 
@@ -44,7 +43,7 @@ func NewDestination() sdk.Destination {
 }
 
 func (d *Destination) Parameters() config.Parameters {
-	return nil // d.config.Parameters()
+	return d.config.Parameters()
 }
 
 func (d *Destination) Configure(_ context.Context, cfg map[string]string) error {
