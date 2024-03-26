@@ -1,4 +1,4 @@
-// Copyright © 2022 Meroxa, Inc.
+// Copyright © 2024 Meroxa, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,23 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build tools
+
 package file
 
 import (
-	"fmt"
-	"os"
+	_ "github.com/conduitio/conduit-commons/paramgen"
+	_ "github.com/golangci/golangci-lint/cmd/golangci-lint"
 )
-
-type Config struct {
-	// Path is the file path used by the connector to read/write records.
-	Path string `json:"path" validate:"required"`
-}
-
-func (c Config) Validate() error {
-	// make sure we can stat the file, we don't care if it doesn't exist though
-	_, err := os.Stat(c.Path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf(`config value "path" does not contain a valid path: %w`, err)
-	}
-	return nil
-}
