@@ -3,7 +3,7 @@
 ### General
 The File plugin is one of [Conduit](https://github.com/ConduitIO/conduit) builtin plugins.
 It provides both source and destination File connectors, allowing for a file to be either
-a source, or a destination in a Conduit pipeline.
+a source, or a destination in a Conduit pipeline. <img referrerpolicy="no-referrer-when-downgrade" src="https://static.scarf.sh/a.png?x-pxid=42ff59b7-f26d-468d-8c8d-eafc530290cc" />
 
 ### How to build it
 Run `make`.
