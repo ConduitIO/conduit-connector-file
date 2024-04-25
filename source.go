@@ -49,7 +49,7 @@ func (s *Source) Parameters() map[string]sdk.Parameter {
 	}
 }
 
-func (s *Source) Configure(ctx context.Context, m map[string]string) error {
+func (s *Source) Configure(_ context.Context, m map[string]string) error {
 	err := s.validateConfig(m)
 	if err != nil {
 		return err
@@ -81,11 +81,11 @@ func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
 	}
 }
 
-func (s *Source) Ack(ctx context.Context, position sdk.Position) error {
+func (s *Source) Ack(context.Context, sdk.Position) error {
 	return nil // no ack needed
 }
 
-func (s *Source) Teardown(ctx context.Context) error {
+func (s *Source) Teardown(context.Context) error {
 	if s.tail != nil {
 		return s.tail.Stop()
 	}

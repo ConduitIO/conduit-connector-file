@@ -47,7 +47,7 @@ func (d *Destination) Parameters() map[string]sdk.Parameter {
 	}
 }
 
-func (d *Destination) Configure(ctx context.Context, m map[string]string) error {
+func (d *Destination) Configure(_ context.Context, m map[string]string) error {
 	err := d.validateConfig(m)
 	if err != nil {
 		return err
@@ -56,7 +56,7 @@ func (d *Destination) Configure(ctx context.Context, m map[string]string) error 
 	return nil
 }
 
-func (d *Destination) Open(ctx context.Context) error {
+func (d *Destination) Open(_ context.Context) error {
 	file, err := d.openOrCreate(d.config[ConfigPath])
 	if err != nil {
 		return err
@@ -66,7 +66,7 @@ func (d *Destination) Open(ctx context.Context) error {
 	return nil
 }
 
-func (d *Destination) Write(ctx context.Context, recs []sdk.Record) (int, error) {
+func (d *Destination) Write(_ context.Context, recs []sdk.Record) (int, error) {
 	defer d.buf.Reset() // always reset buffer after write
 	for _, r := range recs {
 		d.buf.Write(r.Bytes())
@@ -79,7 +79,7 @@ func (d *Destination) Write(ctx context.Context, recs []sdk.Record) (int, error)
 	return len(recs), nil
 }
 
-func (d *Destination) Teardown(ctx context.Context) error {
+func (d *Destination) Teardown(context.Context) error {
 	if d.file != nil {
 		return d.file.Close()
 	}
