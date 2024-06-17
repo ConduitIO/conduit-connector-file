@@ -1,6 +1,6 @@
 module github.com/conduitio/conduit-connector-file
 
-go 1.22.2
+go 1.22.4
 
 require (
 	github.com/conduitio/conduit-commons v0.2.0

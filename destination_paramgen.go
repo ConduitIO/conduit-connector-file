@@ -11,7 +11,7 @@ func (DestinationConfig) Parameters() map[string]config.Parameter {
 	return map[string]config.Parameter{
 		"path": {
 			Default:     "",
-			Description: "path is the file path used by the connector to read/write records.",
+			Description: "Path is the file path used by the connector to read/write records.",
 			Type:        config.ParameterTypeString,
 			Validations: []config.Validation{
 				config.ValidationRequired{},

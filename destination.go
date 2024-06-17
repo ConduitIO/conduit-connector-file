@@ -21,6 +21,7 @@ import (
 	"os"
 
 	"github.com/conduitio/conduit-commons/config"
+	"github.com/conduitio/conduit-commons/opencdc"
 	sdk "github.com/conduitio/conduit-connector-sdk"
 )
 
@@ -46,8 +47,8 @@ func (d *Destination) Parameters() config.Parameters {
 	return d.config.Parameters()
 }
 
-func (d *Destination) Configure(_ context.Context, cfg map[string]string) error {
-	err := sdk.Util.ParseConfig(cfg, &d.config)
+func (d *Destination) Configure(ctx context.Context, cfg config.Config) error {
+	err := sdk.Util.ParseConfig(ctx, cfg, &d.config, NewDestination().Parameters())
 	if err != nil {
 		return err
 	}
@@ -68,7 +69,7 @@ func (d *Destination) Open(context.Context) error {
 	return nil
 }
 
-func (d *Destination) Write(_ context.Context, recs []sdk.Record) (int, error) {
+func (d *Destination) Write(_ context.Context, recs []opencdc.Record) (int, error) {
 	for i, r := range recs {
 		_, err := d.file.Write(append(r.Bytes(), '\n'))
 		if err != nil {
