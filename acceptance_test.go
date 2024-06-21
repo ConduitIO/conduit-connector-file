@@ -53,6 +53,8 @@ func TestAcceptance(t *testing.T) {
 				goleak.IgnoreTopFunction("syscall.Syscall6"), // linux
 				goleak.IgnoreTopFunction("syscall.syscall6"), // darwin
 			},
+			ReadTimeout:  time.Second,
+			WriteTimeout: time.Second,
 		},
 	})
 }

@@ -12,52 +12,55 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:generate paramgen -output destination_paramgen.go DestinationConfig
+
 package file
 
 import (
-	"bytes"
 	"context"
-	"fmt"
 	"os"
 
+	"github.com/conduitio/conduit-commons/config"
+	"github.com/conduitio/conduit-commons/opencdc"
 	sdk "github.com/conduitio/conduit-connector-sdk"
 )
 
-// Destination connector
 type Destination struct {
 	sdk.UnimplementedDestination
 
-	config map[string]string
+	config DestinationConfig
 
-	buf  bytes.Buffer
 	file *os.File
 }
+
+type DestinationConfig struct {
+	Config // embed the global config
+}
+
+func (c DestinationConfig) Validate() error { return c.Config.Validate() }
 
 func NewDestination() sdk.Destination {
 	return sdk.DestinationWithMiddleware(&Destination{}, sdk.DefaultDestinationMiddleware()...)
 }
 
-func (d *Destination) Parameters() map[string]sdk.Parameter {
-	return map[string]sdk.Parameter{
-		"path": {
-			Default:     "",
-			Description: "the file path where the file destination writes messages",
-			Required:    true,
-		},
-	}
+func (d *Destination) Parameters() config.Parameters {
+	return d.config.Parameters()
 }
 
-func (d *Destination) Configure(_ context.Context, m map[string]string) error {
-	err := d.validateConfig(m)
+func (d *Destination) Configure(ctx context.Context, cfg config.Config) error {
+	err := sdk.Util.ParseConfig(ctx, cfg, &d.config, NewDestination().Parameters())
 	if err != nil {
 		return err
 	}
-	d.config = m
+	err = d.config.Validate()
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
-func (d *Destination) Open(_ context.Context) error {
-	file, err := d.openOrCreate(d.config[ConfigPath])
+func (d *Destination) Open(context.Context) error {
+	file, err := d.openOrCreate(d.config.Path)
 	if err != nil {
 		return err
 	}
@@ -66,15 +69,12 @@ func (d *Destination) Open(_ context.Context) error {
 	return nil
 }
 
-func (d *Destination) Write(_ context.Context, recs []sdk.Record) (int, error) {
-	defer d.buf.Reset() // always reset buffer after write
-	for _, r := range recs {
-		d.buf.Write(r.Bytes())
-		d.buf.WriteRune('\n')
-	}
-	_, err := d.buf.WriteTo(d.file)
-	if err != nil {
-		return 0, err
+func (d *Destination) Write(_ context.Context, recs []opencdc.Record) (int, error) {
+	for i, r := range recs {
+		_, err := d.file.Write(append(r.Bytes(), '\n'))
+		if err != nil {
+			return i, err
+		}
 	}
 	return len(recs), nil
 }
@@ -106,22 +106,4 @@ func (d *Destination) openOrCreate(path string) (*os.File, error) {
 	}
 
 	return file, nil
-}
-
-func (d *Destination) validateConfig(cfg map[string]string) error {
-	path, ok := cfg[ConfigPath]
-	if !ok {
-		return requiredConfigErr(ConfigPath)
-	}
-
-	// make sure we can stat the file, we don't care if it doesn't exist though
-	_, err := os.Stat(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf(
-			"%q config value %q does not contain a valid path: %w",
-			ConfigPath, path, err,
-		)
-	}
-
-	return nil
 }

@@ -12,76 +12,81 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:generate paramgen -output source_paramgen.go SourceConfig
+
 package file
 
 import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 
+	"github.com/conduitio/conduit-commons/config"
+	"github.com/conduitio/conduit-commons/opencdc"
 	sdk "github.com/conduitio/conduit-connector-sdk"
 	"github.com/nxadm/tail"
 )
 
 const MetadataFilePath = "file.path"
 
-// Source connector
 type Source struct {
 	sdk.UnimplementedSource
 
+	config SourceConfig
 	tail   *tail.Tail
-	config map[string]string
 }
+
+type SourceConfig struct {
+	Config // embed the global config
+}
+
+func (c SourceConfig) Validate() error { return c.Config.Validate() }
 
 func NewSource() sdk.Source {
 	return sdk.SourceWithMiddleware(&Source{}, sdk.DefaultSourceMiddleware()...)
 }
 
-func (s *Source) Parameters() map[string]sdk.Parameter {
-	return map[string]sdk.Parameter{
-		"path": {
-			Default:     "",
-			Description: "the file path from which the file source reads messages",
-			Required:    true,
-		},
-	}
+func (s *Source) Parameters() config.Parameters {
+	return s.config.Parameters()
 }
 
-func (s *Source) Configure(_ context.Context, m map[string]string) error {
-	err := s.validateConfig(m)
+func (s *Source) Configure(ctx context.Context, cfg config.Config) error {
+	err := sdk.Util.ParseConfig(ctx, cfg, &s.config, s.config.Parameters())
 	if err != nil {
 		return err
 	}
-	s.config = m
+	err = s.config.Validate()
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
-func (s *Source) Open(ctx context.Context, position sdk.Position) error {
+func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
 	return s.seek(ctx, position)
 }
 
-func (s *Source) Read(ctx context.Context) (sdk.Record, error) {
+func (s *Source) Read(ctx context.Context) (opencdc.Record, error) {
 	select {
 	case line, ok := <-s.tail.Lines:
 		if !ok {
-			return sdk.Record{}, s.tail.Err()
+			return opencdc.Record{}, s.tail.Err()
 		}
 		return sdk.Util.Source.NewRecordCreate(
-			sdk.Position(strconv.FormatInt(line.SeekInfo.Offset, 10)),
+			opencdc.Position(strconv.FormatInt(line.SeekInfo.Offset, 10)),
 			map[string]string{
-				MetadataFilePath: s.config[ConfigPath],
+				MetadataFilePath: s.config.Path,
 			},
-			sdk.RawData(strconv.Itoa(line.Num)), // use line number as key
-			sdk.RawData(line.Text),              // use line content as payload
+			opencdc.RawData(strconv.Itoa(line.Num)), // use line number as key
+			opencdc.RawData(line.Text),              // use line content as payload
 		), nil
 	case <-ctx.Done():
-		return sdk.Record{}, ctx.Err()
+		return opencdc.Record{}, ctx.Err()
 	}
 }
 
-func (s *Source) Ack(context.Context, sdk.Position) error {
+func (s *Source) Ack(context.Context, opencdc.Position) error {
 	return nil // no ack needed
 }
 
@@ -92,7 +97,7 @@ func (s *Source) Teardown(context.Context) error {
 	return nil
 }
 
-func (s *Source) seek(ctx context.Context, p sdk.Position) error {
+func (s *Source) seek(ctx context.Context, p opencdc.Position) error {
 	var offset int64
 	if p != nil {
 		var err error
@@ -107,7 +112,7 @@ func (s *Source) seek(ctx context.Context, p sdk.Position) error {
 		Msgf("seeking...")
 
 	t, err := tail.TailFile(
-		s.config[ConfigPath],
+		s.config.Path,
 		tail.Config{
 			Follow: true,
 			Location: &tail.SeekInfo{
@@ -122,23 +127,5 @@ func (s *Source) seek(ctx context.Context, p sdk.Position) error {
 	}
 
 	s.tail = t
-	return nil
-}
-
-func (s *Source) validateConfig(cfg map[string]string) error {
-	path, ok := cfg[ConfigPath]
-	if !ok {
-		return requiredConfigErr(ConfigPath)
-	}
-
-	// make sure we can stat the file, we don't care if it doesn't exist though
-	_, err := os.Stat(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf(
-			"%q config value %q does not contain a valid path: %w",
-			ConfigPath, path, err,
-		)
-	}
-
 	return nil
 }
