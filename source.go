@@ -19,6 +19,8 @@ package file
 import (
 	"context"
 	"fmt"
+	schema2 "github.com/conduitio/conduit-commons/schema"
+	"github.com/conduitio/conduit-connector-sdk/schema"
 	"io"
 	"strconv"
 
@@ -64,6 +66,11 @@ func (s *Source) Configure(ctx context.Context, cfg config.Config) error {
 }
 
 func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
+	create, err := schema.Create(ctx, schema2.TypeAvro, "my-subject", []byte(`{"type": "int"}`))
+	if err != nil {
+		return err
+	}
+	sdk.Logger(ctx).Info().Any("schema", create).Msg("file open created a schema")
 	return s.seek(ctx, position)
 }
 

@@ -18,7 +18,10 @@ package file
 
 import (
 	"context"
+	"fmt"
+	"github.com/conduitio/conduit-connector-sdk/schema"
 	"os"
+	"strconv"
 
 	"github.com/conduitio/conduit-commons/config"
 	"github.com/conduitio/conduit-commons/opencdc"
@@ -69,7 +72,22 @@ func (d *Destination) Open(context.Context) error {
 	return nil
 }
 
-func (d *Destination) Write(_ context.Context, recs []opencdc.Record) (int, error) {
+func (d *Destination) Write(ctx context.Context, recs []opencdc.Record) (int, error) {
+	version, err := strconv.ParseInt(recs[0].Metadata[opencdc.MetadataPayloadSchemaVersion], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid schema version: %w", err)
+	}
+
+	recSchema, err := schema.Get(
+		ctx,
+		recs[0].Metadata[opencdc.MetadataPayloadSchemaSubject],
+		int(version),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("invalid schema: %w", err)
+	}
+
+	sdk.Logger(ctx).Info().Any("schema", recSchema).Msg("got schema")
 	for i, r := range recs {
 		_, err := d.file.Write(append(r.Bytes(), '\n'))
 		if err != nil {
