@@ -37,6 +37,7 @@ type Source struct {
 
 	config SourceConfig
 	tail   *tail.Tail
+	schema schema2.Schema
 }
 
 type SourceConfig struct {
@@ -70,6 +71,7 @@ func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
 	if err != nil {
 		return err
 	}
+	s.schema = create
 	sdk.Logger(ctx).Info().Any("schema", create).Msg("file open created a schema")
 	return s.seek(ctx, position)
 }
@@ -80,14 +82,17 @@ func (s *Source) Read(ctx context.Context) (opencdc.Record, error) {
 		if !ok {
 			return opencdc.Record{}, s.tail.Err()
 		}
-		return sdk.Util.Source.NewRecordCreate(
+		rec := sdk.Util.Source.NewRecordCreate(
 			opencdc.Position(strconv.FormatInt(line.SeekInfo.Offset, 10)),
 			map[string]string{
 				MetadataFilePath: s.config.Path,
 			},
 			opencdc.RawData(strconv.Itoa(line.Num)), // use line number as key
 			opencdc.RawData(line.Text),              // use line content as payload
-		), nil
+		)
+		rec.Metadata[opencdc.MetadataPayloadSchemaSubject] = s.schema.Subject
+		rec.Metadata[opencdc.MetadataPayloadSchemaVersion] = strconv.Itoa(s.schema.Version)
+		return rec, nil
 	case <-ctx.Done():
 		return opencdc.Record{}, ctx.Err()
 	}
