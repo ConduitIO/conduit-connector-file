@@ -4,7 +4,7 @@ go 1.22.5
 
 require (
 	github.com/conduitio/conduit-commons v0.2.1-0.20240717151024-0c8d1f406cb2
-	github.com/conduitio/conduit-connector-sdk v0.9.2-0.20240725112309-ca667d668641
+	github.com/conduitio/conduit-connector-sdk v0.9.2-0.20240726174515-2a4d744368cb
 	github.com/golangci/golangci-lint v1.59.1
 	github.com/nxadm/tail v1.4.11
 	go.uber.org/goleak v1.3.0
