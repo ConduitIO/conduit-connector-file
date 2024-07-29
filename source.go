@@ -52,7 +52,7 @@ func (s *Source) Parameters() config.Parameters {
 }
 
 func (s *Source) Configure(ctx context.Context, cfg config.Config) error {
-	err := sdk.Util.ParseConfig(ctx, cfg, &s.config, s.config.Parameters())
+	err := sdk.Util.ParseConfig(ctx, cfg, &s.config, NewSource().Parameters())
 	if err != nil {
 		return err
 	}
