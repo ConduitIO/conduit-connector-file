@@ -52,7 +52,7 @@ func NewSource() sdk.Source {
 			sdk.SourceWithSchemaExtractionConfig{
 				PayloadEnabled: lang.Ptr(false),
 				KeyEnabled:     lang.Ptr(false),
-			}.Apply,
+			},
 		)...,
 	)
 }
