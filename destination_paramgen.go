@@ -7,9 +7,13 @@ import (
 	"github.com/conduitio/conduit-commons/config"
 )
 
+const (
+	DestinationConfigPath = "path"
+)
+
 func (DestinationConfig) Parameters() map[string]config.Parameter {
 	return map[string]config.Parameter{
-		"path": {
+		DestinationConfigPath: {
 			Default:     "",
 			Description: "Path is the file path used by the connector to read/write records.",
 			Type:        config.ParameterTypeString,
