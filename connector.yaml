@@ -7,7 +7,7 @@ specification:
     detect any changes happening to it. Each change will create a new record. The
     destination allows you to write record payloads to a destination file, each new
     record payload is appended to the file in a new line.
-  version: v0.9.0-2-g5befcfa-dirty
+  version: v0.9.0-3-g02b18ea
   author: Meroxa, Inc.
   source:
     parameters:
