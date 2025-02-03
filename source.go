@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:generate paramgen -output source_paramgen.go SourceConfig
-
 package file
 
 import (
@@ -22,7 +20,6 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/conduitio/conduit-commons/config"
 	"github.com/conduitio/conduit-commons/lang"
 	"github.com/conduitio/conduit-commons/opencdc"
 	sdk "github.com/conduitio/conduit-connector-sdk"
@@ -38,39 +35,31 @@ type Source struct {
 	tail   *tail.Tail
 }
 
+func (s *Source) Config() sdk.SourceConfig {
+	return &s.config
+}
+
 type SourceConfig struct {
+	sdk.DefaultSourceMiddleware
+
 	Config // embed the global config
 }
 
-func (c SourceConfig) Validate() error { return c.Config.Validate() }
+func (c SourceConfig) Validate(context.Context) error { return c.Config.Validate() }
 
 func NewSource() sdk.Source {
 	return sdk.SourceWithMiddleware(
-		&Source{},
-		sdk.DefaultSourceMiddleware(
-			// disable schema extraction by default, because the source produces raw data
-			sdk.SourceWithSchemaExtractionConfig{
-				PayloadEnabled: lang.Ptr(false),
-				KeyEnabled:     lang.Ptr(false),
+		&Source{
+			config: SourceConfig{
+				DefaultSourceMiddleware: sdk.DefaultSourceMiddleware{
+					SourceWithSchemaExtraction: sdk.SourceWithSchemaExtraction{
+						PayloadEnabled: lang.Ptr(false),
+						KeyEnabled:     lang.Ptr(false),
+					},
+				},
 			},
-		)...,
+		},
 	)
-}
-
-func (s *Source) Parameters() config.Parameters {
-	return s.config.Parameters()
-}
-
-func (s *Source) Configure(ctx context.Context, cfg config.Config) error {
-	err := sdk.Util.ParseConfig(ctx, cfg, &s.config, NewSource().Parameters())
-	if err != nil {
-		return err
-	}
-	err = s.config.Validate()
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func (s *Source) Open(ctx context.Context, position opencdc.Position) error {

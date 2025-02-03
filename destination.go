@@ -12,15 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:generate paramgen -output destination_paramgen.go DestinationConfig
-
 package file
 
 import (
 	"context"
 	"os"
 
-	"github.com/conduitio/conduit-commons/config"
 	"github.com/conduitio/conduit-commons/opencdc"
 	sdk "github.com/conduitio/conduit-connector-sdk"
 )
@@ -33,30 +30,20 @@ type Destination struct {
 	file *os.File
 }
 
+func (d *Destination) Config() sdk.DestinationConfig {
+	return &d.config
+}
+
 type DestinationConfig struct {
+	sdk.DefaultDestinationMiddleware
+
 	Config // embed the global config
 }
 
-func (c DestinationConfig) Validate() error { return c.Config.Validate() }
+func (c DestinationConfig) Validate(context.Context) error { return c.Config.Validate() }
 
 func NewDestination() sdk.Destination {
-	return sdk.DestinationWithMiddleware(&Destination{}, sdk.DefaultDestinationMiddleware()...)
-}
-
-func (d *Destination) Parameters() config.Parameters {
-	return d.config.Parameters()
-}
-
-func (d *Destination) Configure(ctx context.Context, cfg config.Config) error {
-	err := sdk.Util.ParseConfig(ctx, cfg, &d.config, NewDestination().Parameters())
-	if err != nil {
-		return err
-	}
-	err = d.config.Validate()
-	if err != nil {
-		return err
-	}
-	return nil
+	return sdk.DestinationWithMiddleware(&Destination{})
 }
 
 func (d *Destination) Open(context.Context) error {
