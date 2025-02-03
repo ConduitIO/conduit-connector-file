@@ -13,8 +13,7 @@ name is there, then it will start listening to changes and sending records.
 
 ### Destination
 The Destination connector will create the file if it doesn't exist, and
-records with changes will be appended to the destination file when received.
-<!-- /readmegen:description -->
+records with changes will be appended to the destination file when received.<!-- /readmegen:description -->
 
 ## Source Configuration Parameters
 
