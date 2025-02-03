@@ -22,7 +22,6 @@ import (
 	sdk "github.com/conduitio/conduit-connector-sdk"
 )
 
-
 //go:embed connector.yaml
 var specs string
 
