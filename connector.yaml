@@ -2,7 +2,7 @@ version: "1.0"
 specification:
   name: file
   summary: A file source and destination plugin for Conduit.
-  description: |
+  description: |-
     ## How it works
     The Source connector listens for changes appended to the source file and
     sends records with the changes.
@@ -16,7 +16,7 @@ specification:
     ### Destination
     The Destination connector will create the file if it doesn't exist, and
     records with changes will be appended to the destination file when received.
-  version: (devel)
+  version: v0.10.0-dev
   author: Meroxa, Inc.
   source:
     parameters:
