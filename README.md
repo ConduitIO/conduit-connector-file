@@ -1,11 +1,5 @@
 # Conduit Connector File
 
-## General
-![scarf pixel](https://static.scarf.sh/a.png?x-pxid=42ff59b7-f26d-468d-8c8d-eafc530290cc)
-The File plugin is one of [Conduit](https://github.com/ConduitIO/conduit) builtin plugins.
-It provides both source and destination File connectors, allowing for a file to be either
-a source, or a destination in a Conduit pipeline. 
-
 <!-- readmegen:description -->
 ## How it works
 The Source connector listens for changes appended to the source file and 
@@ -127,12 +121,15 @@ pipelines:
 <!-- /readmegen:destination.parameters.yaml -->
 
 ## How to build it
+
 Run `make`.
 
 ## Testing
+
 Run `make test` to run all the tests.
 
 ## Limitations
+
 * The  Source connector only detects appended changes to the file, so it
   doesn't detect deletes or edits.
 * The connectors can only access local files on the machine where Conduit
@@ -141,4 +138,4 @@ Run `make test` to run all the tests.
 * Currently, only works reliably with text files (may work with non-text
   files, but not guaranteed)
 
-
+![scarf pixel](https://static.scarf.sh/a.png?x-pxid=42ff59b7-f26d-468d-8c8d-eafc530290cc)

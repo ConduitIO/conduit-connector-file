@@ -28,17 +28,6 @@ import (
 
 const MetadataFilePath = "file.path"
 
-type Source struct {
-	sdk.UnimplementedSource
-
-	config SourceConfig
-	tail   *tail.Tail
-}
-
-func (s *Source) Config() sdk.SourceConfig {
-	return &s.config
-}
-
 type SourceConfig struct {
 	sdk.DefaultSourceMiddleware
 
@@ -46,6 +35,13 @@ type SourceConfig struct {
 }
 
 func (c SourceConfig) Validate(context.Context) error { return c.Config.Validate() }
+
+type Source struct {
+	sdk.UnimplementedSource
+
+	config SourceConfig
+	tail   *tail.Tail
+}
 
 func NewSource() sdk.Source {
 	return sdk.SourceWithMiddleware(
@@ -60,6 +56,10 @@ func NewSource() sdk.Source {
 			},
 		},
 	)
+}
+
+func (s *Source) Config() sdk.SourceConfig {
+	return &s.config
 }
 
 func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
