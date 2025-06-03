@@ -19,7 +19,7 @@ specification:
 
     The Destination connector will create the file if it doesn't exist, and
     records with changes will be appended to the destination file when received.
-  version: v0.10.2
+  version: v0.10.3
   author: Meroxa, Inc.
   source:
     parameters:
