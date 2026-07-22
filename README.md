@@ -33,7 +33,6 @@ pipelines:
     connectors:
       - id: example
         plugin: "file"
-        type: source
         settings:
           # Path is the file path used by the connector to read/write records.
           # Type: string
@@ -97,7 +96,6 @@ pipelines:
     connectors:
       - id: example
         plugin: "file"
-        type: destination
         settings:
           # Path is the file path used by the connector to read/write records.
           # Type: string
