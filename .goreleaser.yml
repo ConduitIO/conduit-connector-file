@@ -1,4 +1,10 @@
 version: 2
+# keep-existing: tolerate a release the registry publish.yml may have already
+# created (both workflows fire on a version tag). GoReleaser adds its user
+# binaries without failing on, or deleting, the publish Action's signed
+# artifacts. See .github/workflows/publish.yml's "Ensure the release exists".
+release:
+  mode: keep-existing
 builds:
   - main: ./cmd/connector/main.go
     goos:
