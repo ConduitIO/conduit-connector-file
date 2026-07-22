@@ -32,6 +32,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The Action uploads signed assets with `gh release upload` (no create),
+      # so the release must exist first. release.yml (GoReleaser) also creates
+      # it on this same tag — both fire in parallel with no ordering. Create it
+      # here if absent (idempotent: `|| true` on the already-exists race);
+      # GoReleaser's `release.mode: keep-existing` then tolerates it. --generate-notes
+      # gives reasonable notes even when this step wins the race.
+      - name: Ensure the release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$TAG" --generate-notes \
+            || echo "release $TAG already exists — nothing to create"
+
       - name: Build + cosign-sign the artifact matrix
         id: publish
         uses: ConduitIO/connector-publish-action@v1
