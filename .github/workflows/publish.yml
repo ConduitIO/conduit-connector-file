@@ -96,6 +96,9 @@ jobs:
           mode: publish
           connector-name: file
           version: ${{ github.ref_name }}
+          # build artifacts from job 1 — required because build and publish are
+          # separate jobs (a step output can't cross a job boundary).
+          artifacts-json: ${{ needs.build.outputs.artifacts }}
           min-conduit-version: '0.15.0'
           min-protocol-version: '0.9.0'
           repository: https://github.com/ConduitIO/conduit-connector-file
