@@ -20,7 +20,10 @@ name is there, then it will start listening to changes and sending records.
 ### Destination
 
 The Destination connector will create the file if it doesn't exist, and
-records with changes will be appended to the destination file when received.<!-- /readmegen:description -->
+records with changes will be appended to the destination file when received.
+A file created by the connector is readable and writable by its owner only
+(mode 0600, further restricted by the process umask). The mode of an
+existing file is never changed.<!-- /readmegen:description -->
 
 ## Source Configuration Parameters
 

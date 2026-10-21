@@ -126,24 +126,15 @@ func (d *Destination) Teardown(context.Context) error {
 	return closeErr
 }
 
+// destinationFileMode is the mode used when the connector creates the output
+// file. Records may contain sensitive data, so the file is owner-only
+// (GHSA-wj57-rcgj-4x67). The process umask can only make it stricter.
+const destinationFileMode = 0o600
+
+// openOrCreate opens the file for appending, creating it with
+// destinationFileMode if it does not exist. Creation and open are one atomic
+// syscall, so there is no window between a stat and a create. The mode of an
+// already existing file is never changed.
 func (d *Destination) openOrCreate(path string) (*os.File, error) {
-	_, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		file, err := os.Create(path)
-		if err != nil {
-			return nil, err
-		}
-
-		return file, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return nil, err
-	}
-
-	return file, nil
+	return os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, destinationFileMode)
 }
