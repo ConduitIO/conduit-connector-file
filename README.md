@@ -21,6 +21,10 @@ name is there, then it will start listening to changes and sending records.
 
 The Destination connector will create the file if it doesn't exist, and
 records with changes will be appended to the destination file when received.
+> **Output files created by earlier versions stay world-readable (0644).**
+> This version creates new ones 0600 but never changes the mode of an
+> existing file: run `chmod 600` on the output files of existing pipelines.
+
 A file created by the connector is readable and writable by its owner only
 (mode 0600, further restricted by the process umask). The mode of an
 existing file is never changed: **output files created by earlier versions
