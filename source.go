@@ -16,9 +16,9 @@ package file
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/conduitio/conduit-commons/lang"
 	"github.com/conduitio/conduit-commons/opencdc"
@@ -31,9 +31,20 @@ type SourceConfig struct {
 	sdk.DefaultSourceMiddleware
 
 	Config // embed the global config
+
+	// QuietPeriod is how long the last line of the file, when it has no
+	// trailing newline, must stay unchanged before it is read as a record.
+	// Lines that end in a newline are read as soon as they are written.
+	// 0 reads such a line at once, as versions before v0.11.0 did.
+	QuietPeriod time.Duration `json:"quietPeriod" default:"1s"`
 }
 
-func (c SourceConfig) Validate(context.Context) error { return c.Config.Validate() }
+func (c SourceConfig) Validate(context.Context) error {
+	if c.QuietPeriod < 0 {
+		return fmt.Errorf(`config value "quietPeriod" must not be negative, got %v`, c.QuietPeriod)
+	}
+	return c.Config.Validate()
+}
 
 type Source struct {
 	sdk.UnimplementedSource
@@ -62,13 +73,13 @@ func (s *Source) Config() sdk.SourceConfig {
 }
 
 func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
+	pos, err := parsePosition(s.config.Path, position)
+	if err != nil {
+		return err
+	}
 	var offset int64
-	if position != nil {
-		var err error
-		offset, err = strconv.ParseInt(string(position), 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid position %v, expected a number", position)
-		}
+	if pos != nil {
+		offset = pos.offset
 	}
 
 	sdk.Logger(ctx).Info().
@@ -77,7 +88,10 @@ func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
 
 	// The follower opens the path through the engine's opener when there is
 	// one (WithOpener), also whenever it re-opens the file later.
-	fol := newFollower(s.config.Path, openerFrom(ctx), offset)
+	logger := sdk.Logger(ctx)
+	fol := newFollower(s.config.Path, openerFrom(ctx), pos, s.config.QuietPeriod, func(format string, args ...any) {
+		logger.Info().Msgf(format, args...)
+	})
 	if err := fol.start(); err != nil {
 		return fmt.Errorf("could not follow file: %w", err)
 	}
@@ -86,15 +100,21 @@ func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
 }
 
 func (s *Source) Read(ctx context.Context) (opencdc.Record, error) {
-	line, num, pos, err := s.fol.next(ctx)
+	line, num, _, err := s.fol.next(ctx)
 	if err != nil {
-		if errors.Is(err, errFileGone) {
-			return opencdc.Record{}, fmt.Errorf("%q: %w", s.config.Path, err)
+		if ctx.Err() == nil {
+			return opencdc.Record{}, err
 		}
-		return opencdc.Record{}, err
+		// Graceful stop (invariant 7): a last line without a newline that was
+		// already read is returned and checkpointed instead of being left for
+		// a replay. Anything not read yet is replayed after the restart.
+		var ok bool
+		if line, num, _, ok = s.fol.takeTail(); !ok {
+			return opencdc.Record{}, err
+		}
 	}
 	return sdk.Util.Source.NewRecordCreate(
-		opencdc.Position(strconv.FormatInt(pos, 10)),
+		opencdc.Position(s.fol.position()),
 		map[string]string{
 			MetadataFilePath: s.config.Path,
 		},

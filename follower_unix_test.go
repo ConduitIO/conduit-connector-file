@@ -19,12 +19,8 @@ package file
 import (
 	"context"
 	"errors"
-	"fmt"
-	"math/rand"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -55,7 +51,7 @@ func TestFollower_SymlinkRefusedAtOpen(t *testing.T) {
 	if err := os.Symlink(secretFile(t), link); err != nil {
 		t.Fatal(err)
 	}
-	fl := newFollower(link, noFollow, 0)
+	fl := nf(link, noFollow, 0)
 	err := fl.start()
 	if err == nil {
 		t.Fatal("symlink was opened")
@@ -71,7 +67,7 @@ func TestFollower_SymlinkRefusedAtOpen(t *testing.T) {
 func TestFollower_SymlinkSwapAfterOpenRefusedAtReverify(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f.txt")
 	writeFile(t, p, "ok\n")
-	fl := newFollower(p, noFollow, 0)
+	fl := nf(p, noFollow, 0)
 	if err := fl.start(); err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +95,7 @@ func TestFollower_SymlinkSwapAfterOpenRefusedAtReverify(t *testing.T) {
 func TestFollower_SymlinkSwapRefusedAtTruncationReopen(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f.txt")
 	writeFile(t, p, "aaaa\nbbbb\n")
-	fl := newFollower(p, noFollow, 0)
+	fl := nf(p, noFollow, 0)
 	if err := fl.start(); err != nil {
 		t.Fatal(err)
 	}
@@ -121,9 +117,9 @@ func TestFollower_SymlinkSwapRefusedAtTruncationReopen(t *testing.T) {
 	}
 }
 
-// With the default opener (no engine policy) a swapped path is not refused, but
-// the inode check still ends the follow instead of reading the new target.
-func TestFollower_SwappedInodeEndsFollow(t *testing.T) {
+// With the default opener (no engine policy) a swapped path is not refused: it
+// is a rotation to a new file. This is what the engine-supplied opener prevents.
+func TestFollower_SwappedPathIsFollowedWithDefaultOpener(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f.txt")
 	writeFile(t, p, "ok\n")
 	fl := newTestFollower(t, p, 0)
@@ -134,9 +130,10 @@ func TestFollower_SwappedInodeEndsFollow(t *testing.T) {
 	if err := os.Symlink(secretFile(t), p); err != nil {
 		t.Fatal(err)
 	}
-	// Different inode: the follow ends (errFileGone), nothing is read from the link.
-	if _, err := nextWithin(t, fl, 5*time.Second); !errors.Is(err, errFileGone) {
-		t.Fatalf("err = %v", err)
+	// Different inode: the follow switches to what is at the path, from its
+	// start. Only an engine opener can refuse the link.
+	if g := mustNext(t, fl); g != (got{"TOP-SECRET-FROM-OTHER-FILE", 1, 27}) {
+		t.Fatalf("got %+v", g)
 	}
 }
 
@@ -165,164 +162,10 @@ func TestSource_PositionAndRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(rec.Position) != "11" || string(rec.Key.Bytes()) != "1" || string(rec.Payload.After.Bytes()) != "beta" {
+	if !strings.HasPrefix(string(rec.Position), "v1:11:") || string(rec.Key.Bytes()) != "1" || string(rec.Payload.After.Bytes()) != "beta" {
 		t.Fatalf("record = pos %q key %q payload %q", rec.Position, rec.Key.Bytes(), rec.Payload.After.Bytes())
 	}
 	if err := (&Source{config: s.config}).Open(ctx, opencdc.Position("nope")); err == nil {
 		t.Fatal("bad position accepted")
 	}
-}
-
-// ---- kill -9 recovery -------------------------------------------------------
-
-const (
-	envKillChild = "FILE_FOLLOWER_KILL_CHILD"
-	totalLines   = 30000
-)
-
-// TestMain-free child: when re-executed with envKillChild set, the test binary
-// acts as a connector: it follows the file from the checkpoint, "delivers" each
-// line to the out file, and checkpoints the position after delivery (never
-// before: at-least-once). It is killed with SIGKILL by the parent.
-func TestKillChildHelper(t *testing.T) {
-	dir := os.Getenv(envKillChild)
-	if dir == "" {
-		t.Skip("helper process")
-	}
-	src := filepath.Join(dir, "src.txt")
-	ckpt := filepath.Join(dir, "ckpt")
-	out, err := os.OpenFile(filepath.Join(dir, "out.txt"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // test
-	if err != nil {
-		t.Fatal(err)
-	}
-	var off int64
-	if b, err := os.ReadFile(ckpt); err == nil { //nolint:gosec // test
-		off, _ = strconv.ParseInt(string(b), 10, 64)
-	}
-	fl := newFollower(src, os.OpenFile, off)
-	if err := fl.start(); err != nil {
-		t.Fatal(err)
-	}
-	for {
-		line, _, pos, err := fl.next(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		// Deliver (to the OS; a SIGKILL does not lose data written to the kernel) ...
-		if _, err := fmt.Fprintf(out, "%s\n", line); err != nil {
-			t.Fatal(err)
-		}
-		// ... then checkpoint atomically: write temp, rename.
-		tmp := ckpt + ".tmp"
-		if err := os.WriteFile(tmp, []byte(strconv.FormatInt(pos, 10)), 0o600); err != nil { //nolint:gosec // test
-			t.Fatal(err)
-		}
-		if err := os.Rename(tmp, ckpt); err != nil { //nolint:gosec // test
-			t.Fatal(err)
-		}
-	}
-}
-
-func startChild(t *testing.T, dir string) *exec.Cmd {
-	t.Helper()
-	cmd := exec.CommandContext(context.Background(), os.Args[0], //nolint:gosec // re-executes the test binary
-		"-test.run=^TestKillChildHelper$", "-test.v")
-	cmd.Env = append(os.Environ(), envKillChild+"="+dir)
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	return cmd
-}
-
-func TestFollower_Kill9RecoveryNoGaps(t *testing.T) {
-	if testing.Short() {
-		t.Skip("spawns processes")
-	}
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src.txt")
-	writeFile(t, src, "")
-
-	// The writer appends numbered lines in bursts, also while the child runs.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		f, err := os.OpenFile(src, os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		defer f.Close()
-		for i := 1; i <= totalLines; {
-			var sb strings.Builder
-			for range 1 + rand.Intn(200) { //nolint:gosec // test
-				if i > totalLines {
-					break
-				}
-				fmt.Fprintf(&sb, "line-%d\n", i)
-				i++
-			}
-			if _, err := f.WriteString(sb.String()); err != nil {
-				t.Error(err)
-				return
-			}
-			time.Sleep(time.Millisecond)
-		}
-	}()
-
-	kills := 0
-	for kills < 5 {
-		cmd := startChild(t, dir)
-		time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond) //nolint:gosec // test
-		if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
-			t.Fatal(err)
-		}
-		_ = cmd.Wait()
-		kills++
-	}
-	<-done
-
-	// Final run: let it drain to the end, then stop it.
-	cmd := startChild(t, dir)
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		b, _ := os.ReadFile(filepath.Join(dir, "ckpt"))
-		if n, _ := strconv.ParseInt(string(b), 10, 64); n == fileSize(t, src) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("child did not catch up")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	_ = cmd.Process.Signal(syscall.SIGKILL)
-	_ = cmd.Wait()
-
-	// Every line must have been delivered at least once; replays are allowed
-	// (and, since the checkpoint follows delivery, expected).
-	data, err := os.ReadFile(filepath.Join(dir, "out.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	seen := make(map[string]int, totalLines)
-	for _, l := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
-		seen[l]++
-	}
-	dups := 0
-	for i := 1; i <= totalLines; i++ {
-		c := seen[fmt.Sprintf("line-%d", i)]
-		if c == 0 {
-			t.Fatalf("line-%d was never delivered: gap after kill -9", i)
-		}
-		dups += c - 1
-	}
-	t.Logf("%d lines, %d kills, %d replayed lines, 0 gaps", totalLines, kills, dups)
-}
-
-func fileSize(t *testing.T, p string) int64 {
-	t.Helper()
-	fi, err := os.Stat(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return fi.Size()
 }

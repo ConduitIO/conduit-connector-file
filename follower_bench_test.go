@@ -36,7 +36,7 @@ func BenchmarkFollowerRead(b *testing.B) {
 	}
 	b.ResetTimer()
 	for range b.N {
-		fl := newFollower(p, os.OpenFile, 0)
+		fl := nf(p, os.OpenFile, 0)
 		if err := fl.start(); err != nil {
 			b.Fatal(err)
 		}

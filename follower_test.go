@@ -31,9 +31,19 @@ type got struct {
 	num, pos int64
 }
 
+// nf builds a follower that resumes at a legacy offset (0: from the start) and
+// returns partial lines at once.
+func nf(path string, open Opener, offset int64) *follower {
+	var p *position
+	if offset > 0 {
+		p = &position{offset: offset, legacy: true}
+	}
+	return newFollower(path, open, p, 0, nil)
+}
+
 func newTestFollower(t *testing.T, path string, offset int64) *follower {
 	t.Helper()
-	fl := newFollower(path, os.OpenFile, offset)
+	fl := nf(path, os.OpenFile, offset)
 	if err := fl.start(); err != nil {
 		t.Fatal(err)
 	}
@@ -108,13 +118,13 @@ func TestFollower_LinesNumbersAndPositions(t *testing.T) {
 	}
 }
 
-func TestFollower_PartialLastLine(t *testing.T) {
+func TestFollower_PartialLastLine_QuietZeroReturnsAtOnce(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f.txt")
 	writeFile(t, p, "ab\ncd")
 	fl := newTestFollower(t, p, 0)
 
-	// Like nxadm/tail: the partial line is returned at once, the rest of it
-	// later as a line of its own.
+	// quietPeriod 0 keeps the v0.10.x behavior: the partial line is returned at
+	// once, the rest of it later as a line of its own.
 	if g := mustNext(t, fl); g != (got{"ab", 1, 3}) {
 		t.Fatalf("got %+v", g)
 	}
@@ -149,30 +159,33 @@ func TestFollower_Truncation(t *testing.T) {
 	}
 }
 
-func TestFollower_RotationEndsFollowAfterDrainingOldFile(t *testing.T) {
+func TestFollower_RotationDrainsOldFileThenFollowsNewOne(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
 	writeFile(t, p, "a\n")
 	fl := newTestFollower(t, p, 0)
 	mustNext(t, fl)
 
-	// Data written to the old file just before it is rotated is not lost.
+	// Data written to the old file just before it is rotated is not lost, and
+	// the new file is read from its first byte.
 	appendFile(t, p, "b\n")
 	if err := os.Rename(p, p+".1"); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, p, "new\n")
+	writeFile(t, p, "new1\nnew2\n")
 
-	if g := mustNext(t, fl); g.line != "b" {
+	if g := mustNext(t, fl); g != (got{"b", 2, 4}) {
 		t.Fatalf("old file's last line = %+v", g)
 	}
-	_, err := nextWithin(t, fl, 5*time.Second)
-	if !errors.Is(err, errFileGone) {
-		t.Fatalf("err = %v, want errFileGone", err)
+	if g := mustNext(t, fl); g != (got{"new1", 1, 5}) {
+		t.Fatalf("new file's first line = %+v", g)
+	}
+	if g := mustNext(t, fl); g != (got{"new2", 2, 10}) {
+		t.Fatalf("got %+v", g)
 	}
 }
 
-func TestFollower_RemovedFileEndsFollow(t *testing.T) {
+func TestFollower_RemovedFileThenRecreated(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f.txt")
 	writeFile(t, p, "a\n")
 	fl := newTestFollower(t, p, 0)
@@ -180,8 +193,13 @@ func TestFollower_RemovedFileEndsFollow(t *testing.T) {
 	if err := os.Remove(p); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := nextWithin(t, fl, 5*time.Second); !errors.Is(err, errFileGone) {
-		t.Fatalf("err = %v, want errFileGone", err)
+	// Nothing to read while the path is gone.
+	if _, err := nextWithin(t, fl, 300*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want a wait", err)
+	}
+	writeFile(t, p, "again\n")
+	if g := mustNext(t, fl); g != (got{"again", 1, 6}) {
+		t.Fatalf("got %+v", g)
 	}
 }
 
@@ -198,7 +216,7 @@ func TestFollower_WaitsForMissingFile(t *testing.T) {
 }
 
 func TestFollower_RefusesNonRegularFile(t *testing.T) {
-	fl := newFollower(t.TempDir(), os.OpenFile, 0) // a directory
+	fl := nf(t.TempDir(), os.OpenFile, 0) // a directory
 	if err := fl.start(); !errors.Is(err, errNotRegular) {
 		t.Fatalf("start = %v, want errNotRegular", err)
 	}
@@ -262,37 +280,25 @@ func TestFollower_RestartMidFile(t *testing.T) {
 	}
 }
 
-// After a rotation the position of the old file is applied to whatever is at
-// the path (the position format carries no file identity, as before). This test
-// pins that behavior: it is the documented limitation, not a guarantee.
-func TestFollower_RestartAfterRotationUsesOffsetInNewFile(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "f.txt")
-	writeFile(t, p, "old1\nold2\n")
-	fl := newTestFollower(t, p, 0)
-	readAll(t, fl, 2) // position 10
-	pos := int64(10)
-	_ = fl.close()
-
-	if err := os.Rename(p, p+".1"); err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, p, "new-1\nnew-2\nnew-3\n")
-
-	fl = newTestFollower(t, p, pos)
-	// Offset 10 is inside "new-2": the head of the new file was skipped.
-	if g := mustNext(t, fl); g != (got{"2", 1, 12}) {
-		t.Fatalf("got %+v", g)
-	}
-}
-
-// Truncated below the saved position while the connector was down: the file is
-// read from its start (at-least-once).
-func TestFollower_RestartPastEndRereadsFromStart(t *testing.T) {
+// A legacy offset that is past the end of the file, or not at the start of a
+// line, cannot be verified and is refused instead of guessed at.
+func TestFollower_LegacyOffsetRefusedWhenUnverifiable(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f.txt")
-	writeFile(t, p, "a\nb\n")
-	fl := newTestFollower(t, p, 1000)
-	if g := mustNext(t, fl); g != (got{"a", 1, 2}) {
+	writeFile(t, p, "new-1\nnew-2\n")
+	for name, off := range map[string]int64{"mid-line": 10, "past end": 1000} {
+		fl := nf(p, os.OpenFile, off)
+		err := fl.start()
+		var ce *CodedError
+		if !errors.As(err, &ce) || ce.Code != ErrCodePositionUnverifiable {
+			t.Fatalf("%s: err = %v, want %s", name, err, ErrCodePositionUnverifiable)
+		}
+		if ce.Path != p || ce.Fix == "" {
+			t.Fatalf("%s: error lacks path or fix: %+v", name, ce)
+		}
+	}
+	// A line boundary is verified and accepted.
+	fl := newTestFollower(t, p, 6)
+	if g := mustNext(t, fl); g != (got{"new-2", 1, 12}) {
 		t.Fatalf("got %+v", g)
 	}
 }
@@ -316,9 +322,13 @@ func randContent(r *rand.Rand) string {
 }
 
 // checkPositionRoundTrip asserts the position contract for one file content:
-// reading everything reconstructs the file byte for byte, positions strictly
-// increase and end at the file size, and starting at any returned position
-// yields exactly the lines that follow it, with identical positions.
+// reading everything reconstructs the file byte for byte, offsets strictly
+// increase and end at the file size, every saved position survives
+// parsePosition/String unchanged, and resuming from any of them (v1, and the
+// legacy offset where it follows a newline) yields exactly the lines that
+// follow, with identical positions.
+//
+//nolint:gocyclo // one linear scenario, split would hide the contract
 func checkPositionRoundTrip(t *testing.T, content string) {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "f.txt")
@@ -331,34 +341,49 @@ func checkPositionRoundTrip(t *testing.T, content string) {
 		}
 	}
 	fl := newTestFollower(t, p, 0)
-	all := readAll(t, fl, want)
+	var all []got
+	var saved []string
+	for range want {
+		all = append(all, mustNext(t, fl))
+		saved = append(saved, fl.position())
+	}
 	_ = fl.close()
 
 	var prev int64
-	var rebuilt strings.Builder
 	for i, g := range all {
 		if g.pos <= prev || g.num != int64(i+1) {
-			t.Fatalf("line %d: %+v after position %d", i, g, prev)
+			t.Fatalf("line %d: %+v after offset %d", i, g, prev)
 		}
-		rebuilt.WriteString(content[prev:g.pos])
-		if content[prev:g.pos] != g.line && content[prev:g.pos] != g.line+"\n" {
-			t.Fatalf("line %d %q does not match bytes %q", i, g.line, content[prev:g.pos])
+		if seg := content[prev:g.pos]; seg != g.line && seg != g.line+"\n" {
+			t.Fatalf("line %d %q does not match bytes %q", i, g.line, seg)
 		}
 		prev = g.pos
 	}
-	if prev != int64(len(content)) || rebuilt.String() != content {
-		t.Fatalf("positions end at %d, file has %d bytes", prev, len(content))
+	if prev != int64(len(content)) {
+		t.Fatalf("offsets end at %d, file has %d bytes", prev, len(content))
 	}
 
 	for k := range all {
-		fl := newTestFollower(t, p, all[k].pos)
-		rest := readAll(t, fl, len(all)-k-1)
-		_ = fl.close()
-		for i, g := range rest {
-			w := all[k+1+i]
-			if g.line != w.line || g.pos != w.pos {
-				t.Fatalf("start at %d: got %+v, want %+v", all[k].pos, g, w)
+		pp, err := parsePosition(p, []byte(saved[k]))
+		if err != nil || pp.legacy || pp.offset != all[k].pos || pp.String() != saved[k] {
+			t.Fatalf("position %q does not round-trip: %+v, %v", saved[k], pp, err)
+		}
+		resumes := []*position{pp}
+		if content[all[k].pos-1] == '\n' {
+			resumes = append(resumes, &position{offset: all[k].pos, legacy: true})
+		}
+		for _, rp := range resumes {
+			fl := newFollower(p, os.OpenFile, rp, 0, nil)
+			if err := fl.start(); err != nil {
+				t.Fatalf("resume %q: %v", rp, err)
 			}
+			for i := k + 1; i < len(all); i++ {
+				g := mustNext(t, fl)
+				if g.line != all[i].line || g.pos != all[i].pos || fl.position() != saved[i] {
+					t.Fatalf("resume %q: got %+v (%s), want %+v (%s)", rp, g, fl.position(), all[i], saved[i])
+				}
+			}
+			_ = fl.close()
 		}
 	}
 }
