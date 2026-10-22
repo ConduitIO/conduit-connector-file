@@ -17,7 +17,6 @@ package file
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"time"
 
@@ -41,7 +40,9 @@ type SourceConfig struct {
 
 	// RotatedPattern is a glob that matches the rotated files of the path, for
 	// example "app.log.*" (relative to the directory of path unless it is
-	// absolute). With it the source finds the rotation chain itself, orders it
+	// absolute). Wildcards are only allowed in the last component, so the
+	// directory is literal; an embedding engine may refuse it
+	// (file.WithDirChecker). With it the source finds the rotation chain itself, orders it
 	// by modification time and reads every file in turn: the tail of the file
 	// it was reading, the files rotated in between from their first byte, then
 	// the current file. Without it the source stops with the error
@@ -55,12 +56,25 @@ type SourceConfig struct {
 	RotationAcceptLoss bool `json:"rotation.acceptLoss" default:"false"`
 }
 
-func (c SourceConfig) Validate(context.Context) error {
+func (c SourceConfig) Validate(ctx context.Context) error {
 	if c.QuietPeriod < 0 {
 		return fmt.Errorf(`config value "quietPeriod" must not be negative, got %v`, c.QuietPeriod)
 	}
-	if _, err := filepath.Match(c.RotatedPattern, ""); err != nil {
-		return fmt.Errorf(`config value "rotatedPattern" is not a valid glob: %w`, err)
+	if c.RotatedPattern != "" {
+		dir, _, err := PatternDir(c.Path, c.RotatedPattern)
+		if err != nil {
+			return err
+		}
+		if check := dirCheckerFrom(ctx); check != nil {
+			if err := check(dir); err != nil {
+				return &CodedError{
+					Code: ErrCodeRotatedPatternDenied, Path: c.Path,
+					Msg: fmt.Sprintf("rotatedPattern lists the directory %q, which is not allowed", dir),
+					Fix: "put rotatedPattern (and path) in a directory the operator allows, or remove rotatedPattern",
+					Err: err,
+				}
+			}
+		}
 	}
 	return c.Config.Validate()
 }
@@ -96,6 +110,12 @@ func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
 	if err != nil {
 		return err
 	}
+	if s.config.RotatedPattern != "" {
+		// Refused here too, not only in Validate: the engine's policy decides.
+		if err := s.config.Validate(ctx); err != nil {
+			return err
+		}
+	}
 	var offset int64
 	if pos != nil {
 		offset = pos.offset
@@ -116,6 +136,7 @@ func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
 		warnf: func(format string, args ...any) {
 			logger.Warn().Msgf(format, args...)
 		},
+		checkDir: dirCheckerFrom(ctx),
 	})
 	if err := fol.start(); err != nil {
 		return fmt.Errorf("could not follow file: %w", err)

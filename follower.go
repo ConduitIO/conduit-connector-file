@@ -302,7 +302,11 @@ func (fl *follower) resolveResume(f *os.File, fi os.FileInfo) (start int64, rota
 		}
 	}
 	if !same {
-		if old := fl.findRotated(p); old != nil {
+		old, err := fl.findRotated(p)
+		if err != nil {
+			return 0, nil, err
+		}
+		if old != nil {
 			fl.logf("the file position %d belongs to was rotated away from %q while the connector was stopped: reading the rest of it, then the file now at the path from its start", p.offset, fl.path)
 			return p.offset, old, nil
 		}
@@ -327,11 +331,15 @@ func (fl *follower) resolveResume(f *os.File, fi os.FileInfo) (start int64, rota
 // checks size and fingerprint, and opens it through the opener like any other
 // file. It returns nil when there is no such file (deleted, compressed, moved
 // elsewhere, or the platform has no inode numbers).
-func (fl *follower) findRotated(p *position) *os.File {
+func (fl *follower) findRotated(p *position) (*os.File, error) {
 	if !p.idKnown() {
-		return nil
+		return nil, nil
 	}
-	for _, c := range fl.family(true) {
+	cands, err := fl.family(true)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range cands {
 		info := c.info
 		if dev, ino, ok := fileID(info); !ok || dev != p.dev || ino != p.ino {
 			continue
@@ -343,15 +351,15 @@ func (fl *follower) findRotated(p *position) *os.File {
 		fi, err := f.Stat()
 		if err == nil && fi.Mode().IsRegular() && os.SameFile(info, fi) && fi.Size() >= p.offset {
 			if p.fpLen == 0 {
-				return f
+				return f, nil
 			}
 			if fp, err := fingerprint(f, p.fpLen); err == nil && fp == p.fp {
-				return f
+				return f, nil
 			}
 		}
 		f.Close()
 	}
-	return nil
+	return nil, nil
 }
 
 // next returns the next line, waiting for it if the file has none. It returns

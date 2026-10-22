@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -38,6 +39,57 @@ type rotationOptions struct {
 	acceptLoss bool
 	// warnf logs a warning.
 	warnf func(format string, args ...any)
+	// checkDir, when set, is asked before every listing.
+	checkDir DirChecker
+}
+
+// dirMeta are the glob characters that must not appear in the directory part.
+// A backslash is the path separator on Windows, not an escape.
+var dirMeta = func() string {
+	if os.PathSeparator == '\\' {
+		return "*?["
+	}
+	return "*?[\\"
+}()
+
+// PatternDir splits rotatedPattern into the directory it lists and the name
+// pattern matched inside it. A relative pattern is relative to the directory of
+// path. The directory part must be literal: wildcards are only allowed in the
+// last component, so the directory an engine policy checks is the directory
+// that is listed.
+func PatternDir(path, pattern string) (dir, name string, err error) {
+	if !filepath.IsAbs(pattern) {
+		pattern = filepath.Join(filepath.Dir(path), pattern)
+	}
+	dir, name = filepath.Split(pattern)
+	dir = filepath.Clean(dir)
+	if name == "" || strings.ContainsAny(dir, dirMeta) {
+		return "", "", &CodedError{
+			Code: ErrCodeRotatedPatternInvalid, Path: path,
+			Msg: fmt.Sprintf("rotatedPattern %q must end in a name pattern and may only use wildcards (* ? [) in that last part, not in a directory", pattern),
+			Fix: "write the directory literally, for example /var/log/app/app.log.*",
+		}
+	}
+	if _, err := filepath.Match(name, ""); err != nil {
+		return "", "", &CodedError{Code: ErrCodeRotatedPatternInvalid, Path: path, Msg: fmt.Sprintf("rotatedPattern %q is not a valid glob", pattern), Fix: "fix the glob", Err: err}
+	}
+	return dir, name, nil
+}
+
+// listDirAllowed asks the engine's policy whether dir may be listed.
+func (fl *follower) listDirAllowed(dir string) error {
+	if fl.rot.checkDir == nil {
+		return nil
+	}
+	if err := fl.rot.checkDir(dir); err != nil {
+		return &CodedError{
+			Code: ErrCodeRotatedPatternDenied, Path: fl.path,
+			Msg: fmt.Sprintf("listing the directory %q to find rotated files is not allowed", dir),
+			Fix: "put rotatedPattern (and path) in a directory the operator allows, or remove rotatedPattern",
+			Err: err,
+		}
+	}
+	return nil
 }
 
 // maxFamily bounds how many directory entries are looked at.
@@ -54,7 +106,7 @@ type famFile struct {
 // name and continues with something other than a letter (app.log.1,
 // app.log-20261021, app.log20261021); with all=true every file in the
 // directory. The path itself is never included. Symlinks are not followed.
-func (fl *follower) family(all bool) []famFile {
+func (fl *follower) family(all bool) ([]famFile, error) {
 	dir, base := filepath.Dir(fl.path), filepath.Base(fl.path)
 	var out []famFile
 	add := func(p string) {
@@ -68,22 +120,33 @@ func (fl *follower) family(all bool) []famFile {
 		out = append(out, famFile{p, info})
 	}
 	if fl.rot.pattern != "" {
-		pat := fl.rot.pattern
-		if !filepath.IsAbs(pat) {
-			pat = filepath.Join(dir, pat)
+		pdir, name, err := PatternDir(fl.path, fl.rot.pattern)
+		if err != nil {
+			return nil, err
 		}
-		matches, _ := filepath.Glob(pat)
-		for i, m := range matches {
+		if err := fl.listDirAllowed(pdir); err != nil {
+			return nil, err
+		}
+		entries, err := os.ReadDir(pdir)
+		if err != nil {
+			return nil, nil //nolint:nilnil // nothing to list is not a failure
+		}
+		for i, e := range entries {
 			if i >= maxFamily {
 				break
 			}
-			add(m)
+			if ok, _ := filepath.Match(name, e.Name()); ok {
+				add(filepath.Join(pdir, e.Name()))
+			}
 		}
-		return out
+		return out, nil
+	}
+	if err := fl.listDirAllowed(dir); err != nil {
+		return nil, err
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return nil, nil //nolint:nilnil // nothing to list is not a failure
 	}
 	for i, e := range entries {
 		if i >= maxFamily {
@@ -101,7 +164,7 @@ func (fl *follower) family(all bool) []famFile {
 		}
 		add(filepath.Join(dir, name))
 	}
-	return out
+	return out, nil
 }
 
 func cutPrefix(s, prefix string) (string, bool) {
@@ -115,14 +178,18 @@ func cutPrefix(s, prefix string) (string, bool) {
 // was last written and no later than next, and that the follower does not
 // already know (prev, next and the queued files). They are the files a rotation
 // chain has between prev and next, oldest first (modification time, then inode).
-func (fl *follower) intermediates(prev, next os.FileInfo) []famFile {
+func (fl *follower) intermediates(prev, next os.FileInfo) ([]famFile, error) {
 	known := []os.FileInfo{prev, next}
 	for _, q := range fl.queue {
 		known = append(known, q.fi)
 	}
 	var out []famFile
+	cands, err := fl.family(false)
+	if err != nil {
+		return nil, err
+	}
 outer:
-	for _, c := range fl.family(false) {
+	for _, c := range cands {
 		for _, k := range known {
 			if os.SameFile(c.info, k) {
 				continue outer
@@ -142,7 +209,7 @@ outer:
 		_, ib, _ := fileID(out[j].info)
 		return ia < ib
 	})
-	return out
+	return out, nil
 }
 
 // enter makes f the followed file after prev (the file just finished, if any)
@@ -159,7 +226,11 @@ func (fl *follower) enter(f *os.File) error {
 		fl.install(f, fi, 0)
 		return nil
 	}
-	mids := fl.intermediates(prev, fi)
+	mids, err := fl.intermediates(prev, fi)
+	if err != nil {
+		f.Close()
+		return err
+	}
 	if len(mids) == 0 {
 		fl.install(f, fi, 0)
 		if len(fl.queue) > 0 {

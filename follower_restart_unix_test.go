@@ -107,7 +107,7 @@ func TestFollower_RestartAfterCopytruncate(t *testing.T) {
 	var warned []string
 	fl = newFollower(p, os.OpenFile, pos, 0, nil).withRotation(rotationOptions{
 		acceptLoss: true,
-		warnf:      func(f string, a ...any) { warned = append(warned, f) },
+		warnf:      func(f string, _ ...any) { warned = append(warned, f) },
 	})
 	if err := fl.start(); err != nil {
 		t.Fatal(err)

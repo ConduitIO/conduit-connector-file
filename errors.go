@@ -32,6 +32,12 @@ const (
 	// cannot be read now (the file is gone, moved, compressed, or an unknown
 	// file sits between the rotated one and the current one).
 	ErrCodeRotationTailUnreadable = "FILE_ROTATION_TAIL_UNREADABLE"
+	// ErrCodeRotatedPatternDenied: the engine's policy does not allow listing
+	// the directory rotatedPattern points into.
+	ErrCodeRotatedPatternDenied = "FILE_ROTATED_PATTERN_DENIED"
+	// ErrCodeRotatedPatternInvalid: rotatedPattern is not a valid glob, or has
+	// a wildcard in its directory part.
+	ErrCodeRotatedPatternInvalid = "FILE_ROTATED_PATTERN_INVALID"
 )
 
 // CodedError is an error with a stable code, the failing setting and a

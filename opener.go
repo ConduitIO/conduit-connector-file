@@ -45,3 +45,28 @@ func openerFrom(ctx context.Context) Opener {
 	}
 	return os.OpenFile
 }
+
+// DirChecker tells whether the connector may list a directory (to find rotated
+// files). An embedding engine supplies one through [WithDirChecker] to apply its
+// path policy to rotatedPattern, the same way [WithOpener] polices opens. It
+// returns an error to refuse. Without one, listing is not restricted.
+type DirChecker func(dir string) error
+
+type dirCheckerKey struct{}
+
+// WithDirChecker returns a context carrying c. The source calls it with the
+// literal directory of rotatedPattern (or, without a pattern, the directory of
+// path) before every listing: at configuration, at open, when it looks for the
+// file a saved position belongs to, and when it accounts for files between a
+// rotated file and the current one. A nil c is ignored.
+func WithDirChecker(ctx context.Context, c DirChecker) context.Context {
+	if c == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, dirCheckerKey{}, c)
+}
+
+func dirCheckerFrom(ctx context.Context) DirChecker {
+	c, _ := ctx.Value(dirCheckerKey{}).(DirChecker)
+	return c
+}

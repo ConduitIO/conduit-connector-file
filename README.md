@@ -59,7 +59,8 @@ A file created by the connector is readable and writable by its owner only
 (mode 0600, further restricted by the process umask). The mode of an
 existing file is never changed.
 An embedding engine can supply the open function through `file.WithOpener`
-(both the source and the destination use it).<!-- /readmegen:description -->
+(both the source and the destination use it) and a check for the directories
+the source lists to find rotated files through `file.WithDirChecker`.<!-- /readmegen:description -->
 
 ## Source Configuration Parameters
 
@@ -87,12 +88,15 @@ pipelines:
           quietPeriod: "1s"
           # RotatedPattern is a glob that matches the rotated files of the path,
           # for example "app.log.*" (relative to the directory of path unless it
-          # is absolute). With it the source finds the rotation chain itself,
-          # orders it by modification time and reads every file in turn: the
-          # tail of the file it was reading, the files rotated in between from
-          # their first byte, then the current file. Without it the source stops
-          # with the error FILE_ROTATION_TAIL_UNREADABLE when it cannot account
-          # for a rotated file's unread tail. Compressed files are not read.
+          # is absolute). Wildcards are only allowed in the last component, so
+          # the directory is literal; an embedding engine may refuse it
+          # (file.WithDirChecker). With it the source finds the rotation chain
+          # itself, orders it by modification time and reads every file in turn:
+          # the tail of the file it was reading, the files rotated in between
+          # from their first byte, then the current file. Without it the source
+          # stops with the error FILE_ROTATION_TAIL_UNREADABLE when it cannot
+          # account for a rotated file's unread tail. Compressed files are not
+          # read.
           # Type: string
           # Required: no
           rotatedPattern: ""
@@ -247,6 +251,12 @@ Behavior changes of the source:
 
 * The  Source connector only detects appended changes to the file, so it
   doesn't detect deletes or edits.
+* `rotatedPattern` may only use wildcards in its last component (the directory
+  is literal) and is checked against the embedding engine's directory policy
+  (`file.WithDirChecker`) at configuration, at open and before every listing;
+  a directory the policy does not allow is refused with
+  `FILE_ROTATED_PATTERN_DENIED`, a wildcard directory with
+  `FILE_ROTATED_PATTERN_INVALID`.
 * Without `rotatedPattern` a rotated file is only found if it is still in the
   same directory under any name (renamed, found by inode) and the source never
   skips one silently: a deleted, compressed or moved rotated file, or a file

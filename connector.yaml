@@ -57,7 +57,8 @@ specification:
     (mode 0600, further restricted by the process umask). The mode of an
     existing file is never changed.
     An embedding engine can supply the open function through `file.WithOpener`
-    (both the source and the destination use it).
+    (both the source and the destination use it) and a check for the directories
+    the source lists to find rotated files through `file.WithDirChecker`.
   version: v0.10.9
   author: Meroxa, Inc.
   source:
@@ -82,7 +83,9 @@ specification:
         description: |-
           RotatedPattern is a glob that matches the rotated files of the path, for
           example "app.log.*" (relative to the directory of path unless it is
-          absolute). With it the source finds the rotation chain itself, orders it
+          absolute). Wildcards are only allowed in the last component, so the
+          directory is literal; an embedding engine may refuse it
+          (file.WithDirChecker). With it the source finds the rotation chain itself, orders it
           by modification time and reads every file in turn: the tail of the file
           it was reading, the files rotated in between from their first byte, then
           the current file. Without it the source stops with the error
