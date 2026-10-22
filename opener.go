@@ -22,16 +22,16 @@ import (
 // Opener opens a file for the connector. The engine that embeds the connector
 // can supply one through [WithOpener] to enforce its own path policy at the
 // moment the file is opened (for example by refusing to follow a symlink that
-// appeared after the path was checked). The default is os.OpenFile.
+// appeared after the path was checked). The default is os.OpenFile. The source
+// calls it for every open of the path, including the periodic check that the
+// path still names the file being followed and the re-open after a truncation.
 type Opener func(path string, flag int, perm os.FileMode) (*os.File, error)
 
 type openerKey struct{}
 
 // WithOpener returns a context carrying o. The destination uses it to open its
-// output file. A nil o is ignored.
-//
-// The source is not affected: it follows the file with github.com/nxadm/tail,
-// which opens the path itself.
+// output file and the source to open (and re-open) the file it follows. The
+// source reads o from the context of Open. A nil o is ignored.
 func WithOpener(ctx context.Context, o Opener) context.Context {
 	if o == nil {
 		return ctx

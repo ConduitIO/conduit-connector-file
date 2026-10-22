@@ -29,7 +29,7 @@ func TestDestination_UsesContextOpener(t *testing.T) {
 	var gotPerm os.FileMode
 	ctx := WithOpener(context.Background(), func(p string, flag int, perm os.FileMode) (*os.File, error) {
 		gotPath, gotFlag, gotPerm = p, flag, perm
-		return os.OpenFile(p, flag, perm)
+		return os.OpenFile(p, flag, perm) //nolint:gosec // test
 	})
 
 	d := &Destination{config: DestinationConfig{Config: Config{Path: path}}}

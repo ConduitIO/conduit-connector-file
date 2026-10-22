@@ -21,7 +21,6 @@ import (
 	"time"
 
 	sdk "github.com/conduitio/conduit-connector-sdk"
-	"go.uber.org/goleak"
 )
 
 func TestAcceptance(t *testing.T) {
@@ -45,18 +44,6 @@ func TestAcceptance(t *testing.T) {
 				}
 			},
 
-			GoleakOptions: []goleak.Option{
-				// tail will initialize a InotifyTracker and keep it running
-				// forever as a shared instance, both goroutines belong to it
-				goleak.IgnoreTopFunction("github.com/nxadm/tail/watch.(*InotifyTracker).run"),
-				// fsnotify >= v1.8 moved the event loop from (*Watcher) onto
-				// the per-OS backend types.
-				goleak.IgnoreAnyFunction("github.com/fsnotify/fsnotify.(*Watcher).readEvents"),
-				goleak.IgnoreAnyFunction("github.com/fsnotify/fsnotify.(*inotify).readEvents"), // linux
-				goleak.IgnoreAnyFunction("github.com/fsnotify/fsnotify.(*kqueue).readEvents"),  // darwin, bsd
-				goleak.IgnoreTopFunction("syscall.Syscall6"),                                   // linux
-				goleak.IgnoreTopFunction("syscall.syscall6"),                                   // darwin
-			},
 			ReadTimeout:  time.Second,
 			WriteTimeout: time.Second,
 		},

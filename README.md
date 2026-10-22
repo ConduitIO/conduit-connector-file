@@ -16,6 +16,11 @@ The Destination connector receives records and writes them to a file.
 The Source connector only cares to have a valid path, even if the file
 doesn't exist, it will still run and wait until a file with the configured
 name is there, then it will start listening to changes and sending records.
+The file is followed by the connector itself. If the file is removed,
+renamed (rotated) or replaced, the source stops with an error. A file that
+is truncated is read again from its start. A position is a byte offset into
+the file at the path, so after a rotation a restart applies it to the new
+file.
 
 ### Destination
 
@@ -25,7 +30,7 @@ A file created by the connector is readable and writable by its owner only
 (mode 0600, further restricted by the process umask). The mode of an
 existing file is never changed.
 An embedding engine can supply the open function through `file.WithOpener`
-(the destination uses it; the source does not).<!-- /readmegen:description -->
+(both the source and the destination use it).<!-- /readmegen:description -->
 
 ## Source Configuration Parameters
 
@@ -165,6 +170,10 @@ Run `make test` to run all the tests.
 
 * The  Source connector only detects appended changes to the file, so it
   doesn't detect deletes or edits.
+* The Source connector stops with an error when the file is removed, renamed
+  (rotated) or replaced; it does not follow the new file. A saved position is
+  a byte offset with no file identity, so a restart after a rotation applies it
+  to the new file.
 * The connectors can only access local files on the machine where Conduit
   is running. So, running Conduit on a server means it can't access a file
   on your local machine.

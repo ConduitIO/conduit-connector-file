@@ -5,8 +5,6 @@ go 1.26.9
 require (
 	github.com/conduitio/conduit-commons v0.8.0
 	github.com/conduitio/conduit-connector-sdk v0.15.0
-	github.com/nxadm/tail v1.4.11
-	go.uber.org/goleak v1.3.0
 )
 
 require (
@@ -20,7 +18,6 @@ require (
 	github.com/conduitio/evolviconf/evolviyaml v0.1.0 // indirect
 	github.com/conduitio/yaml/v3 v3.3.0 // indirect
 	github.com/fatih/color v1.19.0 // indirect
-	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/goccy/go-json v0.11.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
@@ -49,6 +46,7 @@ require (
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/spf13/cast v1.7.0 // indirect
 	github.com/twmb/go-cache v1.4.0 // indirect
+	go.uber.org/goleak v1.3.0 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/net v0.61.0 // indirect
@@ -59,7 +57,6 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
-	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
 	gopkg.in/tomb.v2 v2.0.0-20161208151619-d5d1b5820637 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

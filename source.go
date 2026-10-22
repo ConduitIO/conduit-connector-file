@@ -16,14 +16,13 @@ package file
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"strconv"
 
 	"github.com/conduitio/conduit-commons/lang"
 	"github.com/conduitio/conduit-commons/opencdc"
 	sdk "github.com/conduitio/conduit-connector-sdk"
-	"github.com/nxadm/tail"
 )
 
 const MetadataFilePath = "file.path"
@@ -40,7 +39,7 @@ type Source struct {
 	sdk.UnimplementedSource
 
 	config SourceConfig
-	tail   *tail.Tail
+	fol    *follower
 }
 
 func NewSource() sdk.Source {
@@ -63,46 +62,12 @@ func (s *Source) Config() sdk.SourceConfig {
 }
 
 func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
-	return s.seek(ctx, position)
-}
-
-func (s *Source) Read(ctx context.Context) (opencdc.Record, error) {
-	select {
-	case line, ok := <-s.tail.Lines:
-		if !ok {
-			return opencdc.Record{}, s.tail.Err()
-		}
-		return sdk.Util.Source.NewRecordCreate(
-			opencdc.Position(strconv.FormatInt(line.SeekInfo.Offset, 10)),
-			map[string]string{
-				MetadataFilePath: s.config.Path,
-			},
-			opencdc.RawData(strconv.Itoa(line.Num)), // use line number as key
-			opencdc.RawData(line.Text),              // use line content as payload
-		), nil
-	case <-ctx.Done():
-		return opencdc.Record{}, ctx.Err()
-	}
-}
-
-func (s *Source) Ack(context.Context, opencdc.Position) error {
-	return nil // no ack needed
-}
-
-func (s *Source) Teardown(context.Context) error {
-	if s.tail != nil {
-		return s.tail.Stop()
-	}
-	return nil
-}
-
-func (s *Source) seek(ctx context.Context, p opencdc.Position) error {
 	var offset int64
-	if p != nil {
+	if position != nil {
 		var err error
-		offset, err = strconv.ParseInt(string(p), 10, 64)
+		offset, err = strconv.ParseInt(string(position), 10, 64)
 		if err != nil {
-			return fmt.Errorf("invalid position %v, expected a number", p)
+			return fmt.Errorf("invalid position %v, expected a number", position)
 		}
 	}
 
@@ -110,21 +75,41 @@ func (s *Source) seek(ctx context.Context, p opencdc.Position) error {
 		Int64("position", offset).
 		Msgf("seeking...")
 
-	t, err := tail.TailFile(
-		s.config.Path,
-		tail.Config{
-			Follow: true,
-			Location: &tail.SeekInfo{
-				Offset: offset,
-				Whence: io.SeekStart,
-			},
-			Logger: tail.DiscardingLogger,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("could not tail file: %w", err)
+	// The follower opens the path through the engine's opener when there is
+	// one (WithOpener), also whenever it re-opens the file later.
+	fol := newFollower(s.config.Path, openerFrom(ctx), offset)
+	if err := fol.start(); err != nil {
+		return fmt.Errorf("could not follow file: %w", err)
 	}
+	s.fol = fol
+	return nil
+}
 
-	s.tail = t
+func (s *Source) Read(ctx context.Context) (opencdc.Record, error) {
+	line, num, pos, err := s.fol.next(ctx)
+	if err != nil {
+		if errors.Is(err, errFileGone) {
+			return opencdc.Record{}, fmt.Errorf("%q: %w", s.config.Path, err)
+		}
+		return opencdc.Record{}, err
+	}
+	return sdk.Util.Source.NewRecordCreate(
+		opencdc.Position(strconv.FormatInt(pos, 10)),
+		map[string]string{
+			MetadataFilePath: s.config.Path,
+		},
+		opencdc.RawData(strconv.FormatInt(num, 10)), // use line number as key
+		opencdc.RawData(line),                       // use line content as payload
+	), nil
+}
+
+func (s *Source) Ack(context.Context, opencdc.Position) error {
+	return nil // no ack needed
+}
+
+func (s *Source) Teardown(context.Context) error {
+	if s.fol != nil {
+		return s.fol.close()
+	}
 	return nil
 }

@@ -14,6 +14,11 @@ specification:
     The Source connector only cares to have a valid path, even if the file
     doesn't exist, it will still run and wait until a file with the configured
     name is there, then it will start listening to changes and sending records.
+    The file is followed by the connector itself. If the file is removed,
+    renamed (rotated) or replaced, the source stops with an error. A file that
+    is truncated is read again from its start. A position is a byte offset into
+    the file at the path, so after a rotation a restart applies it to the new
+    file.
 
     ### Destination
 
@@ -23,7 +28,7 @@ specification:
     (mode 0600, further restricted by the process umask). The mode of an
     existing file is never changed.
     An embedding engine can supply the open function through `file.WithOpener`
-    (the destination uses it; the source does not).
+    (both the source and the destination use it).
   version: v0.10.9
   author: Meroxa, Inc.
   source:
