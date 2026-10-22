@@ -24,7 +24,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -124,6 +123,10 @@ type follower struct {
 	offset int64 // position after the last line returned
 	lineNo int64
 
+	rot        rotationOptions
+	hopFrom    os.FileInfo // the file just finished, until the next one is entered
+	warnedFull bool
+
 	queue    []queuedFile // files seen at the path after the followed one, oldest first
 	lastPoll time.Time
 
@@ -137,11 +140,22 @@ type follower struct {
 	lastPos string            // v1 position after the last line returned
 }
 
+// withRotation sets the operator's rotation options.
+func (fl *follower) withRotation(o rotationOptions) *follower {
+	fl.rot = o
+	if fl.rot.warnf == nil {
+		fl.rot.warnf = fl.logf
+	}
+	return fl
+}
+
 func newFollower(path string, open Opener, resume *position, quiet time.Duration, logf func(string, ...any)) *follower {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &follower{path: path, open: open, resume: resume, quiet: quiet, logf: logf}
+	fl := &follower{path: path, open: open, resume: resume, quiet: quiet, logf: logf}
+	fl.rot.warnf = logf
+	return fl
 }
 
 // start opens the file if it exists. A missing file is not an error: next waits
@@ -212,6 +226,10 @@ func (fl *follower) tryOpen() (bool, error) {
 			}
 		}
 	}
+	if fl.hopFrom != nil {
+		// The first file at the path after the followed one was finished.
+		return true, fl.enter(f)
+	}
 	fl.install(f, fi, start)
 	if rotatedAway {
 		fl.switching = switchRotated
@@ -242,6 +260,8 @@ func (fl *follower) install(f *os.File, fi os.FileInfo, start int64) {
 //
 // A legacy offset has no identity, so it is only accepted when it is within
 // the file and follows a newline; anything else would be a guess.
+//
+//nolint:gocyclo // one decision table over the saved position, split would hide it
 func (fl *follower) resolveResume(f *os.File, fi os.FileInfo) (start int64, rotated *os.File, err error) {
 	p := fl.resume
 	size := fi.Size()
@@ -286,18 +306,24 @@ func (fl *follower) resolveResume(f *os.File, fi os.FileInfo) (start int64, rota
 			fl.logf("the file position %d belongs to was rotated away from %q while the connector was stopped: reading the rest of it, then the file now at the path from its start", p.offset, fl.path)
 			return p.offset, old, nil
 		}
-		fl.logf("the file at %q is not the file position %d belongs to (rotated or replaced); reading it from its start", fl.path, p.offset)
+		msg := fmt.Sprintf("the file the saved position %d belongs to is not the file at the path and cannot be found: its unread tail (size unknown) is lost", p.offset)
+		if known && p.idKnown() && dev == p.dev && ino == p.ino {
+			// Same inode, different content: truncated or rewritten in place
+			// (copytruncate), or deleted and the inode reused. The old content
+			// is gone either way.
+			msg = fmt.Sprintf("the file at the path was truncated or replaced (same inode) while the connector was stopped; the content the saved position %d belongs to is gone, its unread tail (size unknown) is lost", p.offset)
+		}
+		if err := fl.tailUnreadable(msg); err != nil {
+			return 0, nil, err
+		}
 		return 0, nil, nil
 	}
 	return p.offset, nil, nil
 }
 
-// maxRotatedScan bounds how many directory entries are examined when looking
-// for a rotated-away file.
-const maxRotatedScan = 100000
-
-// findRotated looks next to the configured path for the file p was taken from,
-// which log rotation usually only renames. It matches device and inode and then
+// findRotated looks for the file p was taken from among the files next to the
+// configured path (any name) or, with rotatedPattern, among its matches. Log
+// rotation usually only renames it. It matches device and inode and then
 // checks size and fingerprint, and opens it through the opener like any other
 // file. It returns nil when there is no such file (deleted, compressed, moved
 // elsewhere, or the platform has no inode numbers).
@@ -305,26 +331,12 @@ func (fl *follower) findRotated(p *position) *os.File {
 	if !p.idKnown() {
 		return nil
 	}
-	dir := filepath.Dir(fl.path)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	for i, e := range entries {
-		if i >= maxRotatedScan {
-			break
-		}
-		if !e.Type().IsRegular() || e.Name() == filepath.Base(fl.path) {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
+	for _, c := range fl.family(true) {
+		info := c.info
 		if dev, ino, ok := fileID(info); !ok || dev != p.dev || ino != p.ino {
 			continue
 		}
-		f, err := fl.open(filepath.Join(dir, e.Name()), os.O_RDONLY, 0)
+		f, err := fl.open(c.path, os.O_RDONLY, 0)
 		if err != nil {
 			continue
 		}
@@ -553,6 +565,11 @@ func (fl *follower) pollPath() error {
 	}
 	if len(fl.queue) >= maxQueuedFiles {
 		f.Close() // the file at the path is picked up when the queue drains
+		if !fl.warnedFull {
+			fl.warnedFull = true
+			msg := fmt.Sprintf("more than %d rotated files are waiting to be read; newer ones in between would be skipped", maxQueuedFiles)
+			return fl.tailUnreadable(msg)
+		}
 		return nil
 	}
 	fl.queue = append(fl.queue, queuedFile{f, fi})
@@ -562,27 +579,31 @@ func (fl *follower) pollPath() error {
 
 // doSwitch leaves the followed file and follows the next one from its start: the
 // oldest file queued by pollPath, else the file now at the path (through the
-// opener). If there is none yet it waits for one.
+// opener). If there is none yet it waits for one. Before entering the next file
+// it accounts for the files written in between (see enter).
 func (fl *follower) doSwitch() error {
 	kind := fl.switching
 	fl.switching = switchNone
+	prev, err := fl.f.Stat() // fresh size and mtime of the file just finished
+	if err != nil {
+		prev = fl.id
+	}
 	_ = fl.f.Close()
 	fl.f = nil
 	if kind != switchRotated {
 		fl.logf("file %q was truncated: reading it again from its start", fl.path)
-	} else {
-		fl.logf("file %q was rotated, removed or replaced: following the next file at the path from its start", fl.path)
+		fl.hopFrom = nil
+		_, err := fl.tryOpen()
+		return err
 	}
-	if kind == switchRotated && len(fl.queue) > 0 {
+	fl.logf("file %q was rotated, removed or replaced: following the next file from its start", fl.path)
+	fl.hopFrom = prev
+	if len(fl.queue) > 0 {
 		q := fl.queue[0]
 		fl.queue = fl.queue[1:]
-		fl.install(q.f, q.fi, 0)
-		if len(fl.queue) > 0 {
-			fl.switching = switchRotated
-		}
-		return nil
+		return fl.enter(q.f)
 	}
-	_, err := fl.tryOpen()
+	_, err = fl.tryOpen()
 	return err
 }
 

@@ -24,11 +24,25 @@ specification:
     When the file is rotated (renamed, removed or replaced) the source reads the
     old file to its end and then the new file from its first byte. When the file
     is truncated (copytruncate) it is read again from its start.
+    The source never skips the unread data of a rotated file silently. If it
+    cannot account for it, it stops with error code FILE_ROTATION_TAIL_UNREADABLE
+    (naming the path and the fix). That happens when the file the saved position
+    belongs to cannot be found after a restart (deleted, compressed, moved
+    away, or truncated in place), and when a file was written between the rotated file and the current
+    one that the source never saw at the path (two rotations in a row). Set
+    `rotatedPattern`, a glob such as `app.log.*`, and the source finds the
+    rotation chain itself, orders it by modification time and reads each file
+    in turn: the old file's tail, the files in between from their first byte,
+    then the current file. A compressed rotated file cannot be read and stops
+    the source too. Operators who prefer to continue can set
+    `rotation.acceptLoss: true`: the source then logs the same code as a
+    warning, with the size of what it skips, and carries on.
     A position records the file's identity (device, inode, a hash of its first
     4 KiB) and the byte offset. On restart the source resumes at the offset if
     the file at the path is that file; if it was rotated while the connector
-    was stopped it finishes the rotated-away file when it is still next to the
-    path and then reads the new file from its start. Positions written by
+    was stopped it finishes the rotated-away file (found by inode next to the
+    path, or among the files `rotatedPattern` matches) and then reads the new
+    file from its start. Positions written by
     v0.10.x (a bare offset) are accepted if the offset is within the file and
     follows a newline; otherwise the source refuses to start with error code
     FILE_POSITION_UNVERIFIABLE. Other codes: FILE_POSITION_INVALID,
@@ -63,6 +77,27 @@ specification:
           0 reads such a line at once, as versions before v0.11.0 did.
         type: duration
         default: 1s
+        validations: []
+      - name: rotatedPattern
+        description: |-
+          RotatedPattern is a glob that matches the rotated files of the path, for
+          example "app.log.*" (relative to the directory of path unless it is
+          absolute). With it the source finds the rotation chain itself, orders it
+          by modification time and reads every file in turn: the tail of the file
+          it was reading, the files rotated in between from their first byte, then
+          the current file. Without it the source stops with the error
+          FILE_ROTATION_TAIL_UNREADABLE when it cannot account for a rotated file's
+          unread tail. Compressed files are not read.
+        type: string
+        default: ""
+        validations: []
+      - name: rotation.acceptLoss
+        description: |-
+          RotationAcceptLoss makes the source continue, with a warning that names
+          the code and the size of what is skipped, when the unread tail of a
+          rotated file cannot be read, instead of stopping.
+        type: bool
+        default: "false"
         validations: []
       - name: sdk.batch.delay
         description: Maximum delay before an incomplete batch is read from the source.

@@ -33,6 +33,7 @@ import (
 const (
 	envKillChild = "FILE_FOLLOWER_KILL_CHILD"
 	envQuiet     = "FILE_FOLLOWER_QUIET"
+	envPattern   = "FILE_FOLLOWER_PATTERN"
 )
 
 // TestKillChildHelper is not a test: re-executed with envKillChild set, the test
@@ -60,7 +61,7 @@ func TestKillChildHelper(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	fl := newFollower(src, os.OpenFile, pos, quiet, nil)
+	fl := newFollower(src, os.OpenFile, pos, quiet, nil).withRotation(rotationOptions{pattern: os.Getenv(envPattern)})
 	if err := fl.start(); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func startChild(t *testing.T, dir string) *exec.Cmd {
 		"-test.run=^TestKillChildHelper$", "-test.v")
 	// A quiet period of an hour: the unterminated tail is never flushed, so a
 	// kill -9 mid-line must not lose or split anything.
-	cmd.Env = append(os.Environ(), envKillChild+"="+dir, envQuiet+"=1h")
+	cmd.Env = append(os.Environ(), envKillChild+"="+dir, envQuiet+"=1h", envPattern+"="+os.Getenv(envPattern))
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -289,6 +290,47 @@ func TestFollower_Kill9AcrossRotation(t *testing.T) {
 			write(1500)
 		}
 		kills++
+	}
+	finishAndCheck(t, dir, next-1, kills)
+}
+
+// With rotatedPattern the source survives what it cannot otherwise account for:
+// two rotations while it is dead (it was SIGKILLed) are drained in order, the
+// unread tail of the first file, the file in between, then the current file.
+func TestFollower_Kill9AcrossDoubleRotationWithPattern(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns processes")
+	}
+	t.Setenv(envPattern, "src.txt.*")
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.txt")
+	writeFile(t, src, "")
+
+	next := 1
+	write := func(n int) {
+		appendLines(t, src, next, next+n-1)
+		next += n
+		time.Sleep(15 * time.Millisecond) // distinct modification times
+	}
+	rotate := func(k int) {
+		if err := os.Rename(src, fmt.Sprintf("%s.%d", src, k)); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, src, "")
+	}
+
+	write(1000)
+	kills := 0
+	for k := 1; k <= 5; k++ {
+		cmd := startChild(t, dir)
+		waitDelivered(t, dir, next-1)
+		kill9(t, cmd)
+		kills++
+		write(700) // unread tail of the current file
+		rotate(2*k - 1)
+		write(700) // a file the source never sees at the path
+		rotate(2 * k)
+		write(700)
 	}
 	finishAndCheck(t, dir, next-1, kills)
 }

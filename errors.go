@@ -28,6 +28,10 @@ const (
 	// ErrCodeIdentityUnknown: the identity of the file at the path could not be
 	// determined, so the saved position cannot be checked against it.
 	ErrCodeIdentityUnknown = "FILE_IDENTITY_UNKNOWN"
+	// ErrCodeRotationTailUnreadable: data of a rotated file was never read and
+	// cannot be read now (the file is gone, moved, compressed, or an unknown
+	// file sits between the rotated one and the current one).
+	ErrCodeRotationTailUnreadable = "FILE_ROTATION_TAIL_UNREADABLE"
 )
 
 // CodedError is an error with a stable code, the failing setting and a

@@ -17,6 +17,7 @@ package file
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -37,11 +38,29 @@ type SourceConfig struct {
 	// Lines that end in a newline are read as soon as they are written.
 	// 0 reads such a line at once, as versions before v0.11.0 did.
 	QuietPeriod time.Duration `json:"quietPeriod" default:"1s"`
+
+	// RotatedPattern is a glob that matches the rotated files of the path, for
+	// example "app.log.*" (relative to the directory of path unless it is
+	// absolute). With it the source finds the rotation chain itself, orders it
+	// by modification time and reads every file in turn: the tail of the file
+	// it was reading, the files rotated in between from their first byte, then
+	// the current file. Without it the source stops with the error
+	// FILE_ROTATION_TAIL_UNREADABLE when it cannot account for a rotated file's
+	// unread tail. Compressed files are not read.
+	RotatedPattern string `json:"rotatedPattern"`
+
+	// RotationAcceptLoss makes the source continue, with a warning that names
+	// the code and the size of what is skipped, when the unread tail of a
+	// rotated file cannot be read, instead of stopping.
+	RotationAcceptLoss bool `json:"rotation.acceptLoss" default:"false"`
 }
 
 func (c SourceConfig) Validate(context.Context) error {
 	if c.QuietPeriod < 0 {
 		return fmt.Errorf(`config value "quietPeriod" must not be negative, got %v`, c.QuietPeriod)
+	}
+	if _, err := filepath.Match(c.RotatedPattern, ""); err != nil {
+		return fmt.Errorf(`config value "rotatedPattern" is not a valid glob: %w`, err)
 	}
 	return c.Config.Validate()
 }
@@ -91,6 +110,12 @@ func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
 	logger := sdk.Logger(ctx)
 	fol := newFollower(s.config.Path, openerFrom(ctx), pos, s.config.QuietPeriod, func(format string, args ...any) {
 		logger.Info().Msgf(format, args...)
+	}).withRotation(rotationOptions{
+		pattern:    s.config.RotatedPattern,
+		acceptLoss: s.config.RotationAcceptLoss,
+		warnf: func(format string, args ...any) {
+			logger.Warn().Msgf(format, args...)
+		},
 	})
 	if err := fol.start(); err != nil {
 		return fmt.Errorf("could not follow file: %w", err)

@@ -26,11 +26,25 @@ own.
 When the file is rotated (renamed, removed or replaced) the source reads the
 old file to its end and then the new file from its first byte. When the file
 is truncated (copytruncate) it is read again from its start.
+The source never skips the unread data of a rotated file silently. If it
+cannot account for it, it stops with error code FILE_ROTATION_TAIL_UNREADABLE
+(naming the path and the fix). That happens when the file the saved position
+belongs to cannot be found after a restart (deleted, compressed, moved
+away, or truncated in place), and when a file was written between the rotated file and the current
+one that the source never saw at the path (two rotations in a row). Set
+`rotatedPattern`, a glob such as `app.log.*`, and the source finds the
+rotation chain itself, orders it by modification time and reads each file
+in turn: the old file's tail, the files in between from their first byte,
+then the current file. A compressed rotated file cannot be read and stops
+the source too. Operators who prefer to continue can set
+`rotation.acceptLoss: true`: the source then logs the same code as a
+warning, with the size of what it skips, and carries on.
 A position records the file's identity (device, inode, a hash of its first
 4 KiB) and the byte offset. On restart the source resumes at the offset if
 the file at the path is that file; if it was rotated while the connector
-was stopped it finishes the rotated-away file when it is still next to the
-path and then reads the new file from its start. Positions written by
+was stopped it finishes the rotated-away file (found by inode next to the
+path, or among the files `rotatedPattern` matches) and then reads the new
+file from its start. Positions written by
 v0.10.x (a bare offset) are accepted if the offset is within the file and
 follows a newline; otherwise the source refuses to start with error code
 FILE_POSITION_UNVERIFIABLE. Other codes: FILE_POSITION_INVALID,
@@ -71,6 +85,23 @@ pipelines:
           # Type: duration
           # Required: no
           quietPeriod: "1s"
+          # RotatedPattern is a glob that matches the rotated files of the path,
+          # for example "app.log.*" (relative to the directory of path unless it
+          # is absolute). With it the source finds the rotation chain itself,
+          # orders it by modification time and reads every file in turn: the
+          # tail of the file it was reading, the files rotated in between from
+          # their first byte, then the current file. Without it the source stops
+          # with the error FILE_ROTATION_TAIL_UNREADABLE when it cannot account
+          # for a rotated file's unread tail. Compressed files are not read.
+          # Type: string
+          # Required: no
+          rotatedPattern: ""
+          # RotationAcceptLoss makes the source continue, with a warning that
+          # names the code and the size of what is skipped, when the unread tail
+          # of a rotated file cannot be read, instead of stopping.
+          # Type: bool
+          # Required: no
+          rotation.acceptLoss: "false"
           # Maximum delay before an incomplete batch is read from the source.
           # Type: duration
           # Required: no
@@ -197,9 +228,13 @@ Behavior changes of the source:
   second record. A last line without a newline now waits `quietPeriod`
   (default `1s`; `0` restores the old behavior), and is read earlier on
   rotation, truncation or graceful stop.
-* **Rotation is followed.** Before, rotating the file ended the follow
-  silently (empty records were emitted). Now the old file is finished and the
-  new one is read from its first byte.
+* **Rotation is followed, and never skipped silently.** Before, rotating the
+  file ended the follow silently (empty records were emitted). Now the old file
+  is finished and the new one is read from its first byte. When data of a
+  rotated file cannot be accounted for the source stops with
+  `FILE_ROTATION_TAIL_UNREADABLE`; the new optional `rotatedPattern` (for
+  example `app.log.*`) lets it find and read the whole chain, and
+  `rotation.acceptLoss: true` makes it continue with a warning instead.
 * **New position format.** The first record after upgrading carries a position
   that includes the file's identity. v0.10.x cannot read it, so a downgrade
   needs the pipeline's position reset. Offset-only positions from v0.10.x are
@@ -212,14 +247,23 @@ Behavior changes of the source:
 
 * The  Source connector only detects appended changes to the file, so it
   doesn't detect deletes or edits.
-* Rotation is followed when the source sees the new file while it is at the
-  path (it checks about every 200 ms while reading and every 50 ms while idle,
-  and keeps files it has seen open until it gets to them). A file that is
-  created and rotated away again within one check, or two rotations that
-  happen while the connector is stopped, skip the file in between. After one
-  rotation while stopped, the rotated-away file is found only if it is still
-  in the same directory as the path (rename-style rotation); a compressed or
-  moved file is not read.
+* Without `rotatedPattern` a rotated file is only found if it is still in the
+  same directory under any name (renamed, found by inode) and the source never
+  skips one silently: a deleted, compressed or moved rotated file, or a file
+  written between the rotated one and the current one that the source never
+  saw at the path, stops it with `FILE_ROTATION_TAIL_UNREADABLE`. Unrelated
+  files are not mistaken for rotated ones: only names that start with the
+  path's name followed by something other than a letter count. Reading
+  compressed files (`.gz`) is not supported.
+* `rotatedPattern` orders the chain by modification time: a file that was
+  written to again after it was rotated (a writer that kept its old file
+  open) can be ordered after the file it was rotated before, and a file
+  rotated away and deleted before the source saw it cannot be known.
+  Timestamps of equal value are ordered by inode; on file systems with coarse
+  timestamps, two files written within one tick are not told apart.
+* With `sdk.batch.size` or `sdk.batch.delay` set, a graceful stop does not
+  deliver the unterminated last line (the SDK stops collecting when it is
+  cancelled); it is read again, whole, after the restart.
 * A truncation (copytruncate) is detected by the file shrinking or its first
   bytes changing, checked each time the read buffer is refilled; lines that
   were copied away before the truncation but not read yet are not recovered.

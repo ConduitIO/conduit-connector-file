@@ -66,36 +66,6 @@ func TestFollower_RestartAfterRotation_FindsOldFileThenNewHead(t *testing.T) {
 	}
 }
 
-// Same, but the rotated-away file is gone: the new file is read from its start
-// instead of from the old offset, so its head is not skipped.
-func TestFollower_RestartAfterRotation_OldFileGone(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "f.txt")
-	writeFile(t, p, "a\nb\n")
-	fl := newTestFollower(t, p, 0)
-	readAll(t, fl, 2)
-	pos := savedPosition(t, p, fl)
-	_ = fl.close()
-
-	if err := os.Remove(p); err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, p, "new-head-line\nsecond\n")
-
-	var logged []string
-	fl = newFollower(p, os.OpenFile, pos, 0, func(f string, _ ...any) { logged = append(logged, f) })
-	if err := fl.start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = fl.close() })
-	if g := mustNext(t, fl); g != (got{"new-head-line", 1, 14}) {
-		t.Fatalf("got %+v", g)
-	}
-	if len(logged) == 0 {
-		t.Fatal("the rotation was not logged")
-	}
-}
-
 // Same file, appended to while stopped: resumes at the offset.
 func TestFollower_RestartSameFileResumes(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f.txt")
@@ -116,8 +86,8 @@ func TestFollower_RestartSameFileResumes(t *testing.T) {
 	}
 }
 
-// copytruncate while stopped: same inode, new content. The saved position no
-// longer matches the file (first bytes differ), so it is read from its start.
+// copytruncate while stopped: same inode, new content. The content the saved
+// position belongs to is gone, so the source stops, unless the loss is accepted.
 func TestFollower_RestartAfterCopytruncate(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f.txt")
 	writeFile(t, p, "alpha\nbeta\n")
@@ -132,12 +102,22 @@ func TestFollower_RestartAfterCopytruncate(t *testing.T) {
 	appendFile(t, p, "gamma\ndelta\nepsilon\n")
 
 	fl = newFollower(p, os.OpenFile, pos, 0, nil)
+	_ = wantCode(t, fl.start(), ErrCodeRotationTailUnreadable)
+
+	var warned []string
+	fl = newFollower(p, os.OpenFile, pos, 0, nil).withRotation(rotationOptions{
+		acceptLoss: true,
+		warnf:      func(f string, a ...any) { warned = append(warned, f) },
+	})
 	if err := fl.start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = fl.close() })
 	if g := mustNext(t, fl); g.line != "gamma" {
 		t.Fatalf("got %+v", g)
+	}
+	if len(warned) != 1 {
+		t.Fatalf("warnings = %v", warned)
 	}
 }
 
@@ -186,27 +166,5 @@ func TestFollower_RotatedTwiceWhileBehindReadsEveryFile(t *testing.T) {
 
 	if !slices.Equal(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)
-	}
-}
-
-// Documented limitation (README): a rotation is only followed if the follower
-// sees the new file while it is at the path. Two rotations within one poll
-// interval (or while the connector is stopped) skip the file in between. This
-// test pins that so a change in either direction is deliberate.
-func TestFollower_RotatedTwiceBetweenPollsSkipsTheMiddleFile(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "f.txt")
-	writeFile(t, p, "a1\n")
-	fl := newTestFollower(t, p, 0)
-	mustNext(t, fl)
-
-	for i, content := range []string{"b1\n", "c1\n"} {
-		if err := os.Rename(p, p+"."+string(rune('1'+i))); err != nil {
-			t.Fatal(err)
-		}
-		writeFile(t, p, content)
-	}
-	if g := mustNext(t, fl); g.line != "c1" {
-		t.Fatalf("got %+v; b1 is the skipped middle file", g)
 	}
 }
