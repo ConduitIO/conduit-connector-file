@@ -56,7 +56,7 @@ func TestSource_DefaultHoldsUnterminatedLine(t *testing.T) {
 	}
 	// 2 s of silence while a Read waits: nothing is returned (the old 1 s
 	// default would have returned "half"). The context is never cancelled, as
-	// a cancelled one means a graceful stop, which does flush the tail.
+	// a cancelled one means a graceful stop.
 	type result struct {
 		recs []opencdc.Record
 		err  error

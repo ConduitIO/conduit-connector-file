@@ -62,6 +62,39 @@ const (
 type queuedFile struct {
 	f  *os.File
 	fi os.FileInfo
+	// cont marks the continuation of a file that was being read when an older
+	// file turned out to have grown (see checkLate): it is entered at start,
+	// not at its head, and without accounting for files in between.
+	cont  bool
+	start int64
+}
+
+// lateFile is a rotated-away file the follower finished and still holds open: a
+// writer that kept its descriptor (logrotate renames, then signals the program
+// later) can append to it after the follower switched away.
+type lateFile struct {
+	f     *os.File
+	fi    os.FileInfo
+	off   int64
+	until time.Time
+}
+
+const (
+	// lateWindow is how long a finished file is kept open and re-checked.
+	lateWindow = 5 * time.Minute
+	// maxLateFiles bounds the descriptors held for finished files.
+	maxLateFiles = 16
+)
+
+// finishedFile is a file the follower read to its end. It is remembered by
+// identity and by content (the first bytes and the size), because file systems
+// reuse inode numbers: a new file that got the number of a finished one must
+// not be taken for it.
+type finishedFile struct {
+	fi      os.FileInfo
+	size    int64
+	headLen int64
+	head    [sha256.Size]byte
 }
 
 type switchKind int
@@ -87,7 +120,8 @@ const (
 //     is the byte offset just past it, "\n" included, so a position never points
 //     into a line. The exception is the last line of a file that has no
 //     newline: it is held until its newline is written, the file is rotated or
-//     truncated, or takeTail returns it on a graceful stop. Only when the quiet
+//     truncated. A graceful stop does not return it: the position stays at the
+//     start of that line and the whole line is read after the restart. Only when the quiet
 //     period is set (opt-in; 0 holds) is it also returned after the file has not
 //     changed for that long. Data appended to such a line later is returned as a
 //     separate line.
@@ -111,7 +145,7 @@ type follower struct {
 	maxLine int64
 	logf    func(format string, args ...any)
 
-	// mu serializes next, takeTail, start and close: Teardown may run while a
+	// mu serializes next, start and close: Teardown may run while a
 	// Read is still waiting for data. It is never held while sleeping.
 	mu     sync.Mutex
 	closed bool
@@ -127,7 +161,11 @@ type follower struct {
 	offset int64 // position after the last line returned
 	lineNo int64
 
-	finished   []os.FileInfo // files of the chain already read to their end
+	settle     time.Duration // a rotated file is left only after its size was stable this long
+	settleSize int64
+	settleAt   time.Time
+	late       []lateFile
+	finished   []finishedFile // files of the chain already read to their end
 	rot        rotationOptions
 	hopFrom    os.FileInfo // the file just finished, until the next one is entered
 	warnedFull bool
@@ -146,6 +184,14 @@ type follower struct {
 	head    [sha256.Size]byte // fingerprint of the first headLen bytes
 	suffix  string            // position suffix for the current head
 	lastPos string            // v1 position after the last line returned
+}
+
+// withSettle sets how long a rotated file's size must stay unchanged before the
+// follower leaves it (0: at once). A writer that still holds the old file open
+// keeps appending until it is told to reopen; those lines are read first.
+func (fl *follower) withSettle(d time.Duration) *follower {
+	fl.settle = d
+	return fl
 }
 
 // withMaxLine sets the longest line that is read (0: the default).
@@ -258,6 +304,7 @@ func (fl *follower) tryOpen() (bool, error) {
 func (fl *follower) install(f *os.File, fi os.FileInfo, start int64) {
 	fl.offset, fl.lineNo, fl.partial, fl.headLen, fl.suffix = start, 0, nil, 0, ""
 	fl.lastSize, fl.truncUnread = 0, 0
+	fl.settleAt, fl.settleSize = time.Time{}, 0
 	fl.switching = switchNone
 	fl.f, fl.id = f, fi
 	fl.dev, fl.ino, _ = fileID(fi)
@@ -449,20 +496,6 @@ func (fl *follower) position() string {
 	return fl.lastPos
 }
 
-// takeTail returns the bytes read past the last newline as a line, if there
-// are any. It is the graceful-stop flush: the caller emits the record and its
-// position is checkpointed like any other. It reads nothing new, so it stays
-// bounded; a tail that was not read yet is replayed after the next start.
-func (fl *follower) takeTail() (line string, num, offset int64, ok bool) {
-	fl.mu.Lock()
-	defer fl.mu.Unlock()
-	if fl.closed || fl.f == nil || len(fl.partial) == 0 {
-		return "", 0, 0, false
-	}
-	line, num, offset, _, err := fl.emit("", false)
-	return line, num, offset, err == nil
-}
-
 // emit returns the line made of the pending partial bytes and raw.
 func (fl *follower) emit(raw string, complete bool) (line string, num, offset int64, ok bool, err error) {
 	if len(fl.partial) > 0 {
@@ -486,6 +519,7 @@ func (fl *follower) emit(raw string, complete bool) (line string, num, offset in
 		}
 	}
 	fl.partial = nil
+	fl.settleAt = time.Time{}
 	fl.lineNo++
 	fl.lastPos = "v1:" + strconv.FormatInt(fl.offset, 10) + fl.suffix
 	if complete {
@@ -530,6 +564,9 @@ func (fl *follower) step(idle int) (line string, num, offset int64, ok bool, err
 		if err := fl.pollPath(); err != nil {
 			return "", 0, 0, false, err
 		}
+		if err := fl.checkLate(); err != nil {
+			return "", 0, 0, false, err
+		}
 	}
 
 	// Before the buffer is refilled from the file, make sure it is still the
@@ -554,6 +591,7 @@ func (fl *follower) step(idle int) (line string, num, offset int64, ok bool, err
 		if raw != "" {
 			fl.partial = append(fl.partial, raw...)
 			fl.partialAt = time.Now()
+			fl.settleAt = time.Time{}
 		}
 	default:
 		return "", 0, 0, false, fmt.Errorf("error reading file: %w", rerr)
@@ -564,6 +602,15 @@ func (fl *follower) step(idle int) (line string, num, offset int64, ok bool, err
 	// Not when the file was truncated with unread data: then the partial bytes
 	// are the head of a line whose rest only exists in the copy (or is lost),
 	// and a piece of a line is never a record.
+	if fl.switching == switchRotated && fl.settle > 0 {
+		settled, err := fl.settled()
+		if err != nil {
+			return "", 0, 0, false, err
+		}
+		if !settled {
+			return "", 0, 0, false, nil // keep reading the old file until it stops growing
+		}
+	}
 	unreadLoss := fl.switching == switchTruncated && fl.truncUnread > 0
 	if len(fl.partial) > 0 && !unreadLoss && (fl.switching != switchNone || (fl.quiet > 0 && time.Since(fl.partialAt) >= fl.quiet)) {
 		return fl.emit("", false)
@@ -580,6 +627,57 @@ func (fl *follower) step(idle int) (line string, num, offset int64, ok bool, err
 	}
 	fl.lastPoll = time.Now()
 	return "", 0, 0, false, fl.pollPath()
+}
+
+// settled reports whether the rotated file's size has been stable for the settle
+// period.
+func (fl *follower) settled() (bool, error) {
+	fi, err := fl.f.Stat()
+	if err != nil {
+		return false, fmt.Errorf("could not stat file: %w", err)
+	}
+	if fl.settleAt.IsZero() || fi.Size() != fl.settleSize {
+		fl.settleAt, fl.settleSize = time.Now(), fi.Size()
+		return false, nil
+	}
+	return time.Since(fl.settleAt) >= fl.settle, nil
+}
+
+// checkLate looks at the finished files still held open. If one has grown (a
+// writer kept appending after the rotation) the follower goes back to it,
+// reads the new data, and continues with the file it was in. It only does so
+// between lines, with nothing buffered.
+func (fl *follower) checkLate() error {
+	now := time.Now()
+	kept := fl.late[:0]
+	for _, l := range fl.late {
+		if now.After(l.until) {
+			_ = l.f.Close()
+			continue
+		}
+		kept = append(kept, l)
+	}
+	fl.late = kept
+	if fl.switching != switchNone || fl.f == nil || fl.r.Buffered() != 0 || len(fl.partial) != 0 {
+		return nil
+	}
+	for i, l := range fl.late {
+		fi, err := l.f.Stat()
+		if err != nil || fi.Size() <= l.off {
+			continue
+		}
+		fl.late = append(fl.late[:i], fl.late[i+1:]...)
+		cont := queuedFile{f: fl.f, fi: fl.id, cont: true, start: fl.offset}
+		fl.queue = append([]queuedFile{cont}, fl.queue...)
+		fl.install(l.f, l.fi, l.off)
+		if _, err := l.f.Seek(l.off, io.SeekStart); err != nil {
+			return fmt.Errorf("could not seek to %d: %w", l.off, err)
+		}
+		fl.switching = switchRotated // after it settles, back to the file we were in
+		fl.logf("file %q kept growing after it was rotated: reading the new data, then continuing", fl.path)
+		return nil
+	}
+	return nil
 }
 
 // checkTruncated marks the file as truncated when it is shorter than what was
@@ -655,7 +753,7 @@ func (fl *follower) pollPath() error {
 		}
 		return nil
 	}
-	fl.queue = append(fl.queue, queuedFile{f, fi})
+	fl.queue = append(fl.queue, queuedFile{f: f, fi: fi})
 	fl.switching = switchRotated
 	return nil
 }
@@ -671,11 +769,13 @@ func (fl *follower) doSwitch() error {
 	if err != nil {
 		prev = fl.id
 	}
-	_ = fl.f.Close()
+	old := fl.f
 	fl.f = nil
-	fl.finished = append(fl.finished, prev)
-	if len(fl.finished) > 1024 {
-		fl.finished = fl.finished[len(fl.finished)-1024:]
+	fl.rememberFinished(old, prev)
+	if kind == switchRotated && !fl.keepLate(old, prev) {
+		_ = old.Close()
+	} else if kind != switchRotated {
+		_ = old.Close()
 	}
 	if kind != switchRotated {
 		fl.hopFrom = nil
@@ -720,10 +820,71 @@ func (fl *follower) doSwitch() error {
 	if len(fl.queue) > 0 {
 		q := fl.queue[0]
 		fl.queue = fl.queue[1:]
+		if q.cont {
+			fl.hopFrom = nil
+			fl.install(q.f, q.fi, q.start)
+			if _, err := q.f.Seek(q.start, io.SeekStart); err != nil {
+				return fmt.Errorf("could not seek to %d: %w", q.start, err)
+			}
+			if len(fl.queue) > 0 {
+				fl.switching = switchRotated
+			}
+			return nil
+		}
 		return fl.enter(q.f)
 	}
 	_, err = fl.tryOpen()
 	return err
+}
+
+// rememberFinished records f as read to its end.
+func (fl *follower) rememberFinished(f *os.File, fi os.FileInfo) {
+	e := finishedFile{fi: fi, size: fi.Size(), headLen: min(fi.Size(), fingerprintSize)}
+	if e.headLen > 0 {
+		if fp, err := fingerprint(f, e.headLen); err == nil {
+			e.head = fp
+		} else {
+			e.headLen = -1 // unknown content: never matches by content
+		}
+	}
+	fl.finished = append(fl.finished, e)
+	if len(fl.finished) > 1024 {
+		fl.finished = fl.finished[len(fl.finished)-1024:]
+	}
+}
+
+// isFinished reports whether the candidate is a file already read to its end:
+// same identity and still the same content (it may have grown).
+func (fl *follower) isFinished(c famFile) bool {
+	for _, e := range fl.finished {
+		if !os.SameFile(c.info, e.fi) || e.headLen < 0 || c.info.Size() < e.size {
+			continue
+		}
+		if e.headLen == 0 {
+			return true
+		}
+		f, err := fl.open(c.path, openFlags, 0)
+		if err != nil {
+			continue
+		}
+		fp, err := fingerprint(f, e.headLen)
+		f.Close()
+		if err == nil && fp == e.head {
+			return true
+		}
+	}
+	return false
+}
+
+// keepLate holds a finished, rotated file open so lines a writer appends to it
+// later are still read (see checkLate). It reports whether it kept it.
+func (fl *follower) keepLate(f *os.File, fi os.FileInfo) bool {
+	if len(fl.late) >= maxLateFiles {
+		_ = fl.late[0].f.Close()
+		fl.late = fl.late[1:]
+	}
+	fl.late = append(fl.late, lateFile{f: f, fi: fi, off: fl.offset, until: time.Now().Add(lateWindow)})
+	return true
 }
 
 func (fl *follower) close() error {
@@ -734,6 +895,10 @@ func (fl *follower) close() error {
 		_ = q.f.Close()
 	}
 	fl.queue = nil
+	for _, l := range fl.late {
+		_ = l.f.Close()
+	}
+	fl.late = nil
 	if fl.f == nil {
 		return nil
 	}

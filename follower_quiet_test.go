@@ -178,13 +178,13 @@ func readRec(ctx context.Context, t *testing.T, s *Source) opencdc.Record {
 	return rec
 }
 
-// Graceful stop (invariant 7): the pending unterminated line is returned as a
-// record with its position when the read context is cancelled, and a restart
-// from that position does not repeat it.
-func TestSource_GracefulStopFlushesAndCheckpointsTail(t *testing.T) {
+// A graceful stop never emits the unterminated last line: that would make the
+// rest of the line a second record. The position stays at the start of the line
+// and the whole line is read once after the restart (at-least-once, no mangling).
+func TestSource_GracefulStopNeverEmitsAPartialLine(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f.txt")
 	writeFile(t, p, "a\nunterminated")
-	s := newTestSource(p, time.Hour) // never flushed by the quiet period
+	s := newTestSource(p, time.Hour)
 	if err := s.Open(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -192,26 +192,21 @@ func TestSource_GracefulStopFlushesAndCheckpointsTail(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if rec := readRec(ctx, t, s); string(rec.Payload.After.Bytes()) != "a" {
+	rec := readRec(ctx, t, s)
+	if string(rec.Payload.After.Bytes()) != "a" {
 		t.Fatalf("got %s", rec.Payload.After.Bytes())
 	}
+	pos := rec.Position
 	go func() {
 		time.Sleep(150 * time.Millisecond) // the follower has read the tail by now
 		cancel()
 	}()
-	rec := readRec(ctx, t, s)
-	if string(rec.Payload.After.Bytes()) != "unterminated" {
-		t.Fatalf("stop did not flush the tail: %s", rec.Payload.After.Bytes())
-	}
-	pos := rec.Position
-	if _, err := s.Read(ctx); err == nil {
-		t.Fatal("Read after the flush should report the cancellation")
+	if r, err := s.Read(ctx); err == nil {
+		t.Fatalf("the stop emitted %q", r.Payload.After.Bytes())
 	}
 
-	// Restart from the checkpoint: the tail is not repeated. What is appended
-	// afterwards is a line of its own, here first the rest of the flushed
-	// line (just its newline: an empty line), then the next one.
-	appendFile(t, p, "\nnext\n")
+	// restart from the last checkpoint; the writer finishes the line
+	appendFile(t, p, "-done\nnext\n")
 	s2 := newTestSource(p, time.Hour)
 	if err := s2.Open(context.Background(), pos); err != nil {
 		t.Fatal(err)
@@ -219,8 +214,8 @@ func TestSource_GracefulStopFlushesAndCheckpointsTail(t *testing.T) {
 	defer func() { _ = s2.Teardown(context.Background()) }()
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
-	if rec := readRec(ctx2, t, s2); string(rec.Payload.After.Bytes()) != "" {
-		t.Fatalf("after restart got %q, want the empty rest of the flushed line", rec.Payload.After.Bytes())
+	if rec := readRec(ctx2, t, s2); string(rec.Payload.After.Bytes()) != "unterminated-done" {
+		t.Fatalf("after restart got %q, want the whole line", rec.Payload.After.Bytes())
 	}
 	if rec := readRec(ctx2, t, s2); string(rec.Payload.After.Bytes()) != "next" {
 		t.Fatalf("after restart got %s", rec.Payload.After.Bytes())

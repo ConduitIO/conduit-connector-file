@@ -168,7 +168,7 @@ func gracefulStopThroughMiddleware(t *testing.T, batching bool) {
 		}
 	}
 	t.Logf("batching=%v: records delivered before the stop, by number of runs: %v", batching, delivered)
-	if !batching && delivered[3] == 0 {
-		t.Fatalf("the stop never flushed the tail: %v", delivered)
+	if delivered[3] != 0 {
+		t.Fatalf("a stop emitted the unterminated tail: %v", delivered)
 	}
 }

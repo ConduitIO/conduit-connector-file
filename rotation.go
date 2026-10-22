@@ -214,7 +214,7 @@ func cutPrefix(s, prefix string) (string, bool) {
 // already know (prev, next and the queued files). They are the files a rotation
 // chain has between prev and next, oldest first (modification time, then inode).
 func (fl *follower) intermediates(prev, next os.FileInfo) ([]famFile, error) {
-	known := append([]os.FileInfo{prev, next}, fl.finished...)
+	known := []os.FileInfo{prev, next}
 	for _, q := range fl.queue {
 		known = append(known, q.fi)
 	}
@@ -229,6 +229,9 @@ outer:
 			if os.SameFile(c.info, k) {
 				continue outer
 			}
+		}
+		if fl.isFinished(c) {
+			continue
 		}
 		mt := c.info.ModTime()
 		in := mt.After(prev.ModTime())
@@ -353,7 +356,7 @@ func (fl *follower) enter(f *os.File) error {
 			chain = append(chain, q)
 		}
 	}
-	chain = append(chain, queuedFile{f, fi})
+	chain = append(chain, queuedFile{f: f, fi: fi})
 	first := chain[0]
 	fl.install(first.f, first.fi, 0)
 	fl.queue = append(append([]queuedFile{}, chain[1:]...), fl.queue...)
@@ -386,7 +389,7 @@ func (fl *follower) openChainFile(m famFile) (queuedFile, bool, error) {
 		}
 		return queuedFile{}, false, nil
 	}
-	return queuedFile{f, fi}, true, nil
+	return queuedFile{f: f, fi: fi}, true, nil
 }
 
 var compressedMagic = [][]byte{

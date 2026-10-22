@@ -45,6 +45,14 @@ type SourceConfig struct {
 	// truncated.
 	MaxLineSize int64 `json:"maxLineSize" default:"16777216" validate:"gt=0"`
 
+	// RotationSettle is how long a rotated file's size must stay unchanged
+	// before the source leaves it for the next file. A writer that still holds
+	// the old file open (logrotate renames, then signals the program later)
+	// keeps appending to it, and those lines are read first. A file that grows
+	// again after the source left it is read again for a while. 0 switches at
+	// once.
+	RotationSettle time.Duration `json:"rotation.settle" default:"1s"`
+
 	// RotatedPattern is a glob that matches the rotated files of the path, for
 	// example "app.log.*" (relative to the directory of path unless it is
 	// absolute). Wildcards are only allowed in the last component, so the
@@ -137,7 +145,7 @@ func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
 	logger := sdk.Logger(ctx)
 	fol := newFollower(s.config.Path, openerFrom(ctx), pos, s.config.QuietPeriod, func(format string, args ...any) {
 		logger.Info().Msgf(format, args...)
-	}).withMaxLine(s.config.MaxLineSize).withRotation(rotationOptions{
+	}).withMaxLine(s.config.MaxLineSize).withSettle(s.config.RotationSettle).withRotation(rotationOptions{
 		pattern:    s.config.RotatedPattern,
 		acceptLoss: s.config.RotationAcceptLoss,
 		warnf: func(format string, args ...any) {
@@ -154,18 +162,12 @@ func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
 }
 
 func (s *Source) Read(ctx context.Context) (opencdc.Record, error) {
+	// A stop (cancelled ctx) never emits the unterminated last line: a record
+	// is never a piece of a line, so the position stays at the start of that
+	// line and the whole line is read after the restart (at-least-once).
 	line, num, _, err := s.fol.next(ctx)
 	if err != nil {
-		if ctx.Err() == nil {
-			return opencdc.Record{}, err
-		}
-		// Graceful stop (invariant 7): a last line without a newline that was
-		// already read is returned and checkpointed instead of being left for
-		// a replay. Anything not read yet is replayed after the restart.
-		var ok bool
-		if line, num, _, ok = s.fol.takeTail(); !ok {
-			return opencdc.Record{}, err
-		}
+		return opencdc.Record{}, err
 	}
 	return sdk.Util.Source.NewRecordCreate(
 		opencdc.Position(s.fol.position()),

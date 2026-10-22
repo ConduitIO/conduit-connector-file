@@ -19,16 +19,19 @@ name is there, then it will start listening to changes and sending records.
 The file is followed by the connector itself.
 A line is read once its newline has been written; a record is never a piece
 of a line. A last line without a newline is held until its newline is
-written, the file is rotated, or the connector is stopped gracefully (that
-record is checkpointed); data appended to such a line later becomes a record
-of its own. For writers that never terminate their last line, set
+written or the file is rotated or truncated. A graceful stop does not emit
+it either: the position stays at the start of that line and the whole line
+is read after the restart. For writers that never terminate their last line, set
 `quietPeriod` (off by default) and the line is also read once the file has
 not changed for that long.
 A line longer than `maxLineSize` (default 16 MiB) stops the source with
 FILE_LINE_TOO_LONG; lines are never truncated. A path that is not a regular
 file (a FIFO, a device) is refused.
 When the file is rotated (renamed, removed or replaced) the source reads the
-old file to its end and then the new file from its first byte. When the file
+old file until its size has been stable for `rotation.settle` (default 1s):
+a writer that still holds the old file open keeps appending until it is told
+to reopen. Then it reads the new file from its first byte. The old file is
+kept open for a few minutes and read again if it grows once more. When the file
 is truncated (copytruncate) it is read again from its start; lines that
 were written but not yet read when it was truncated now exist only in the
 copy: with `rotatedPattern` the source finds the copy by its first bytes and
@@ -65,6 +68,10 @@ FILE_IDENTITY_UNKNOWN. After the first record, positions are in the new
 format, which v0.10.x cannot read.
 
 ### Destination
+
+> **Output files created by earlier versions stay world-readable (0644).**
+> This version creates them 0600, but it never changes the mode of an
+> existing file: run `chmod 600` on the output files of existing pipelines.
 
 The Destination connector will create the file if it doesn't exist, and
 records with changes will be appended to the destination file when received.
@@ -129,6 +136,15 @@ pipelines:
           # Type: bool
           # Required: no
           rotation.acceptLoss: "false"
+          # RotationSettle is how long a rotated file's size must stay unchanged
+          # before the source leaves it for the next file. A writer that still
+          # holds the old file open (logrotate renames, then signals the program
+          # later) keeps appending to it, and those lines are read first. A file
+          # that grows again after the source left it is read again for a while.
+          # 0 switches at once.
+          # Type: duration
+          # Required: no
+          rotation.settle: "1s"
           # Maximum delay before an incomplete batch is read from the source.
           # Type: duration
           # Required: no
@@ -248,12 +264,17 @@ Run `make test` to run all the tests.
 
 ## Upgrading to v0.11.0
 
+> **Output files created by earlier versions stay world-readable (0644).** This
+> version creates new ones 0600 but never changes an existing file's mode. Run
+> `chmod 600` on the output files of existing pipelines.
+
 Behavior changes of the source:
 
 * **Complete lines only.** A line is read once its newline is written. Before,
   a half-written last line was read at once and the rest of it later became a
   second record. A last line without a newline is now held until its newline
-  is written, the file is rotated, or the connector stops gracefully.
+  is written or the file is rotated or truncated. A graceful stop does not
+  emit it; the whole line is read after the restart.
   `quietPeriod` (off by default) opts back in to reading such a line after it
   has stayed unchanged for that long.
 * **Rotation is followed, and never skipped silently.** Before, rotating the
@@ -304,18 +325,19 @@ Behavior changes of the source:
   their name (a long suffix is a date and ascends, a short one is logrotate's
   index and descends), then by inode. A file with an older timestamp than the
   file before it is not found.
-* With `sdk.batch.size` or `sdk.batch.delay` set, a graceful stop does not
-  deliver the unterminated last line (the SDK stops collecting when it is
-  cancelled); it is read again, whole, after the restart.
 * A truncation (copytruncate) is detected by the file shrinking or its first
   bytes changing, checked each time the read buffer is refilled. If unread
   data was in the file at the previous check, it exists only in the copy: with
   `rotatedPattern` it is read from the copy (identified by its first bytes);
   without, the source stops with `FILE_ROTATION_TAIL_UNREADABLE`. The bytes
   written between the last check and the truncation cannot be known.
-* After a graceful stop the unterminated last line is checkpointed; if the
-  writer completes that line later, the rest of it arrives as a separate
-  record.
+* A graceful stop never emits the unterminated last line: the position stays at
+  the start of that line and the whole line is read after the restart (at-least-once).
+* A rotated file is left only after its size was stable for `rotation.settle`;
+  a writer that signals "reopen" later than that, and appends once more to the
+  old file, is still read (the finished file is held open for 5 minutes, at most
+  16 of them). A file that is never written again after the source left it, and
+  was rotated away and deleted unread, cannot be known.
 * The connectors can only access local files on the machine where Conduit
   is running. So, running Conduit on a server means it can't access a file
   on your local machine.
