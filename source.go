@@ -32,11 +32,18 @@ type SourceConfig struct {
 
 	Config // embed the global config
 
-	// QuietPeriod is how long the last line of the file, when it has no
-	// trailing newline, must stay unchanged before it is read as a record.
-	// Lines that end in a newline are read as soon as they are written.
-	// 0 reads such a line at once, as versions before v0.11.0 did.
-	QuietPeriod time.Duration `json:"quietPeriod" default:"1s"`
+	// QuietPeriod is opt-in and off (0) by default. By default the last line
+	// of the file, when it has no trailing newline yet, is held until its
+	// newline is written, the file is rotated or truncated, or the connector is
+	// stopped gracefully, so a record is never a piece of a line. Set a duration
+	// to also read such a line once the file has not changed for that long, for
+	// writers that never terminate their last line.
+	QuietPeriod time.Duration `json:"quietPeriod" default:"0"`
+
+	// MaxLineSize is the longest line, in bytes, that is read. A longer line
+	// stops the source with the error FILE_LINE_TOO_LONG; a line is never
+	// truncated.
+	MaxLineSize int64 `json:"maxLineSize" default:"16777216" validate:"gt=0"`
 
 	// RotatedPattern is a glob that matches the rotated files of the path, for
 	// example "app.log.*" (relative to the directory of path unless it is
@@ -70,7 +77,7 @@ func (c SourceConfig) Validate(ctx context.Context) error {
 				return &CodedError{
 					Code: ErrCodeRotatedPatternDenied, Path: c.Path,
 					Msg: fmt.Sprintf("rotatedPattern lists the directory %q, which is not allowed", dir),
-					Fix: "put rotatedPattern (and path) in a directory the operator allows, or remove rotatedPattern",
+					Fix: patternDeniedFix,
 					Err: err,
 				}
 			}
@@ -130,13 +137,14 @@ func (s *Source) Open(ctx context.Context, position opencdc.Position) error {
 	logger := sdk.Logger(ctx)
 	fol := newFollower(s.config.Path, openerFrom(ctx), pos, s.config.QuietPeriod, func(format string, args ...any) {
 		logger.Info().Msgf(format, args...)
-	}).withRotation(rotationOptions{
+	}).withMaxLine(s.config.MaxLineSize).withRotation(rotationOptions{
 		pattern:    s.config.RotatedPattern,
 		acceptLoss: s.config.RotationAcceptLoss,
 		warnf: func(format string, args ...any) {
 			logger.Warn().Msgf(format, args...)
 		},
 		checkDir: dirCheckerFrom(ctx),
+		listDir:  dirListerFrom(ctx),
 	})
 	if err := fol.start(); err != nil {
 		return fmt.Errorf("could not follow file: %w", err)

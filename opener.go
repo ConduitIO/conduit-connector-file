@@ -16,6 +16,7 @@ package file
 
 import (
 	"context"
+	"io/fs"
 	"os"
 )
 
@@ -69,4 +70,26 @@ func WithDirChecker(ctx context.Context, c DirChecker) context.Context {
 func dirCheckerFrom(ctx context.Context) DirChecker {
 	c, _ := ctx.Value(dirCheckerKey{}).(DirChecker)
 	return c
+}
+
+// DirLister lists a directory for the source (to find rotated files). An
+// embedding engine supplies one through [WithDirLister] to confine the listing
+// itself, for example by opening the directory below its allowed directory
+// without following symlinks; it replaces os.ReadDir and should apply the
+// checks of the [DirChecker]. Names and types are what the source uses.
+type DirLister func(dir string) ([]fs.DirEntry, error)
+
+type dirListerKey struct{}
+
+// WithDirLister returns a context carrying l. A nil l is ignored.
+func WithDirLister(ctx context.Context, l DirLister) context.Context {
+	if l == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, dirListerKey{}, l)
+}
+
+func dirListerFrom(ctx context.Context) DirLister {
+	l, _ := ctx.Value(dirListerKey{}).(DirLister)
+	return l
 }

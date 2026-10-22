@@ -17,9 +17,11 @@ package file
 import (
 	"bytes"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -41,6 +43,10 @@ type rotationOptions struct {
 	warnf func(format string, args ...any)
 	// checkDir, when set, is asked before every listing.
 	checkDir DirChecker
+	// listDir, when set, lists the directory itself (confined by the engine,
+	// for example with openat2 below its allowed directory) instead of
+	// os.ReadDir; it is used after checkDir.
+	listDir DirLister
 }
 
 // dirMeta are the glob characters that must not appear in the directory part.
@@ -76,6 +82,32 @@ func PatternDir(path, pattern string) (dir, name string, err error) {
 	return dir, name, nil
 }
 
+// readDir lists dir through the engine's lister when there is one (it confines
+// the listing itself), else with os.ReadDir. A directory that does not exist
+// lists as empty.
+func (fl *follower) readDir(dir string) ([]fs.DirEntry, error) {
+	if fl.rot.listDir == nil {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil, nil //nolint:nilnil // nothing to list is not a failure
+		}
+		return entries, nil
+	}
+	entries, err := fl.rot.listDir(dir)
+	if err != nil {
+		if isNotExist(err) {
+			return nil, nil
+		}
+		return nil, &CodedError{
+			Code: ErrCodeRotatedPatternDenied, Path: fl.path,
+			Msg: fmt.Sprintf("listing the directory %q to find rotated files is not allowed", dir),
+			Fix: patternDeniedFix,
+			Err: err,
+		}
+	}
+	return entries, nil
+}
+
 // listDirAllowed asks the engine's policy whether dir may be listed.
 func (fl *follower) listDirAllowed(dir string) error {
 	if fl.rot.checkDir == nil {
@@ -85,12 +117,15 @@ func (fl *follower) listDirAllowed(dir string) error {
 		return &CodedError{
 			Code: ErrCodeRotatedPatternDenied, Path: fl.path,
 			Msg: fmt.Sprintf("listing the directory %q to find rotated files is not allowed", dir),
-			Fix: "put rotatedPattern (and path) in a directory the operator allows, or remove rotatedPattern",
+			Fix: patternDeniedFix,
 			Err: err,
 		}
 	}
 	return nil
 }
+
+// patternDeniedFix is the suggested fix of FILE_ROTATED_PATTERN_DENIED.
+const patternDeniedFix = "put rotatedPattern (and path) in a directory the operator allows, or remove rotatedPattern"
 
 // maxFamily bounds how many directory entries are looked at.
 const maxFamily = 100000
@@ -113,7 +148,7 @@ func (fl *follower) family(all bool) ([]famFile, error) {
 		if filepath.Clean(p) == filepath.Clean(fl.path) {
 			return
 		}
-		info, err := os.Lstat(p)
+		info, err := os.Lstat(p) //nolint:gosec // p is a name from a listing of a directory the engine allowed
 		if err != nil || !info.Mode().IsRegular() {
 			return
 		}
@@ -127,9 +162,9 @@ func (fl *follower) family(all bool) ([]famFile, error) {
 		if err := fl.listDirAllowed(pdir); err != nil {
 			return nil, err
 		}
-		entries, err := os.ReadDir(pdir)
+		entries, err := fl.readDir(pdir)
 		if err != nil {
-			return nil, nil //nolint:nilnil // nothing to list is not a failure
+			return nil, err
 		}
 		for i, e := range entries {
 			if i >= maxFamily {
@@ -144,9 +179,9 @@ func (fl *follower) family(all bool) ([]famFile, error) {
 	if err := fl.listDirAllowed(dir); err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := fl.readDir(dir)
 	if err != nil {
-		return nil, nil //nolint:nilnil // nothing to list is not a failure
+		return nil, err
 	}
 	for i, e := range entries {
 		if i >= maxFamily {
@@ -179,7 +214,7 @@ func cutPrefix(s, prefix string) (string, bool) {
 // already know (prev, next and the queued files). They are the files a rotation
 // chain has between prev and next, oldest first (modification time, then inode).
 func (fl *follower) intermediates(prev, next os.FileInfo) ([]famFile, error) {
-	known := []os.FileInfo{prev, next}
+	known := append([]os.FileInfo{prev, next}, fl.finished...)
 	for _, q := range fl.queue {
 		known = append(known, q.fi)
 	}
@@ -196,7 +231,17 @@ outer:
 			}
 		}
 		mt := c.info.ModTime()
-		if mt.After(prev.ModTime()) && !mt.After(next.ModTime()) {
+		in := mt.After(prev.ModTime())
+		if fl.rot.pattern != "" && mt.Equal(prev.ModTime()) {
+			// Equal modification times (coarse timestamps, files written in the
+			// same tick) are ordered after prev, except the compressed twin that
+			// a compressing rotation leaves of the file just finished.
+			if f, err := fl.open(c.path, openFlags, 0); err == nil {
+				in = !isCompressed(f)
+				f.Close()
+			}
+		}
+		if in && !mt.After(next.ModTime()) {
 			out = append(out, c)
 		}
 	}
@@ -205,11 +250,48 @@ outer:
 		if !a.Equal(b) {
 			return a.Before(b)
 		}
+		if nameBefore(out[i].path, out[j].path) {
+			return true
+		}
+		if nameBefore(out[j].path, out[i].path) {
+			return false
+		}
 		_, ia, _ := fileID(out[i].info)
 		_, ib, _ := fileID(out[j].info)
 		return ia < ib
 	})
 	return out, nil
+}
+
+// nameBefore orders rotated names that were written at the same time by their
+// numeric suffix: a long suffix is a date (20261021) and a larger one is newer;
+// a short one is logrotate's index (app.log.1) and a larger one is older.
+func nameBefore(a, b string) bool {
+	da, na := numericSuffix(a)
+	db, nb := numericSuffix(b)
+	if da == 0 || db == 0 || strings.TrimSuffix(a, strconv.Itoa(na)) != strings.TrimSuffix(b, strconv.Itoa(nb)) {
+		return a < b
+	}
+	if da >= 8 && db >= 8 {
+		return na < nb
+	}
+	return na > nb
+}
+
+// numericSuffix returns the number of trailing digits of name and their value.
+func numericSuffix(name string) (digits, value int) {
+	i := len(name)
+	for i > 0 && name[i-1] >= '0' && name[i-1] <= '9' {
+		i--
+	}
+	if i == len(name) || len(name)-i > 18 {
+		return 0, 0
+	}
+	v, err := strconv.Atoi(name[i:])
+	if err != nil {
+		return 0, 0
+	}
+	return len(name) - i, v
 }
 
 // enter makes f the followed file after prev (the file just finished, if any)
@@ -284,7 +366,7 @@ func (fl *follower) enter(f *os.File) error {
 // openChainFile opens an intermediate through the opener. A compressed file
 // cannot be read: that is an unreadable tail like any other.
 func (fl *follower) openChainFile(m famFile) (queuedFile, bool, error) {
-	f, err := fl.open(m.path, os.O_RDONLY, 0)
+	f, err := fl.open(m.path, openFlags, 0)
 	if err != nil {
 		if isNotExist(err) {
 			return queuedFile{}, false, nil // removed meanwhile
@@ -340,4 +422,37 @@ func (fl *follower) tailUnreadable(msg string) error {
 		fix = "restore the missing or compressed rotated file, widen rotatedPattern if it does not match it, or set rotation.acceptLoss to true to skip it"
 	}
 	return fl.coded(ErrCodeRotationTailUnreadable, msg, fix, nil)
+}
+
+// findCopy looks for the copy a copytruncate rotation made of the file that was
+// just truncated, among the files rotatedPattern matches: it starts with the
+// same bytes (fingerprint) and reaches at least the position we had read to.
+// With several, the most recently modified wins. It returns nil without a
+// pattern or when there is none.
+func (fl *follower) findCopy() (*os.File, error) {
+	if fl.rot.pattern == "" || fl.headLen == 0 {
+		return nil, nil
+	}
+	cands, err := fl.family(true)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].info.ModTime().After(cands[j].info.ModTime()) })
+	for _, c := range cands {
+		if c.info.Size() < fl.offset+fl.truncUnread {
+			continue
+		}
+		f, err := fl.open(c.path, openFlags, 0)
+		if err != nil {
+			continue
+		}
+		fi, err := f.Stat()
+		if err == nil && fi.Mode().IsRegular() && os.SameFile(fi, c.info) && !isCompressed(f) {
+			if fp, err := fingerprint(f, fl.headLen); err == nil && fp == fl.head {
+				return f, nil
+			}
+		}
+		f.Close()
+	}
+	return nil, nil
 }

@@ -86,10 +86,11 @@ const (
 //   - A line is returned once its newline is written. The position after a line
 //     is the byte offset just past it, "\n" included, so a position never points
 //     into a line. The exception is the last line of a file that has no
-//     newline: it is returned after the file has not changed for the quiet
-//     period (0 returns it at once, as v0.10.x did), when the file is rotated
-//     or truncated, or by takeTail on a graceful stop. Data appended to such a
-//     line later is returned as a separate line.
+//     newline: it is held until its newline is written, the file is rotated or
+//     truncated, or takeTail returns it on a graceful stop. Only when the quiet
+//     period is set (opt-in; 0 holds) is it also returned after the file has not
+//     changed for that long. Data appended to such a line later is returned as a
+//     separate line.
 //   - Line numbers count lines returned since the file was opened or re-opened
 //     (not file line numbers): they start at 1 and restart at 1 after a
 //     truncation or rotation.
@@ -105,7 +106,10 @@ type follower struct {
 	path  string
 	open  Opener
 	quiet time.Duration
-	logf  func(format string, args ...any)
+	// maxLine is the longest line (bytes, newline included) that is read;
+	// longer is an error, never a truncation.
+	maxLine int64
+	logf    func(format string, args ...any)
 
 	// mu serializes next, takeTail, start and close: Teardown may run while a
 	// Read is still waiting for data. It is never held while sleeping.
@@ -123,6 +127,7 @@ type follower struct {
 	offset int64 // position after the last line returned
 	lineNo int64
 
+	finished   []os.FileInfo // files of the chain already read to their end
 	rot        rotationOptions
 	hopFrom    os.FileInfo // the file just finished, until the next one is entered
 	warnedFull bool
@@ -134,10 +139,21 @@ type follower struct {
 	partialAt time.Time // when partial last grew
 	switching switchKind
 
+	lastSize    int64 // size of the file at the last check
+	truncUnread int64 // bytes that were unread when a truncation was found
+
 	headLen int64             // bytes covered by head
 	head    [sha256.Size]byte // fingerprint of the first headLen bytes
 	suffix  string            // position suffix for the current head
 	lastPos string            // v1 position after the last line returned
+}
+
+// withMaxLine sets the longest line that is read (0: the default).
+func (fl *follower) withMaxLine(n int64) *follower {
+	if n > 0 {
+		fl.maxLine = n
+	}
+	return fl
 }
 
 // withRotation sets the operator's rotation options.
@@ -155,6 +171,7 @@ func newFollower(path string, open Opener, resume *position, quiet time.Duration
 	}
 	fl := &follower{path: path, open: open, resume: resume, quiet: quiet, logf: logf}
 	fl.rot.warnf = logf
+	fl.maxLine = defaultMaxLineSize
 	return fl
 }
 
@@ -182,7 +199,7 @@ func (fl *follower) tryOpen() (bool, error) {
 	if fl.f != nil {
 		return true, nil
 	}
-	f, err := fl.open(fl.path, os.O_RDONLY, 0)
+	f, err := fl.open(fl.path, openFlags, 0)
 	if err != nil {
 		if isNotExist(err) {
 			return false, nil
@@ -240,6 +257,7 @@ func (fl *follower) tryOpen() (bool, error) {
 // install makes f the followed file, positioned at start.
 func (fl *follower) install(f *os.File, fi os.FileInfo, start int64) {
 	fl.offset, fl.lineNo, fl.partial, fl.headLen, fl.suffix = start, 0, nil, 0, ""
+	fl.lastSize, fl.truncUnread = 0, 0
 	fl.switching = switchNone
 	fl.f, fl.id = f, fi
 	fl.dev, fl.ino, _ = fileID(fi)
@@ -282,12 +300,18 @@ func (fl *follower) resolveResume(f *os.File, fi os.FileInfo) (start int64, rota
 					"the file was probably rotated or replaced; reset the pipeline's position to read the current file from its start", nil)
 			}
 		}
+		dev, ino, _ := fileID(fi)
+		fl.rot.warnf("[%s] resuming from an offset-only position written by v0.10.x: offset %d in %q (inode %d on device %d, %d bytes, modified %s). The position carries no file identity, so this cannot be confirmed to be the file it was taken from; if it was rotated or replaced while upgrading, the first %d bytes of the current file are skipped. Positions written from now on carry the identity",
+			ErrCodePositionUnverifiable, p.offset, fl.path, ino, dev, size, fi.ModTime().UTC().Format(time.RFC3339), p.offset)
 		return p.offset, nil, nil
 	}
 
 	dev, ino, known := fileID(fi)
 	same := size >= p.offset
-	if same && known && p.idKnown() && (dev != p.dev || ino != p.ino) {
+	// The inode decides, not the device number: st_dev changes across reboots
+	// and remounts of the same file system (device-mapper and network volumes,
+	// containers), while the fingerprint below confirms the content.
+	if same && known && p.idKnown() && ino != p.ino {
 		same = false
 	}
 	if same && p.fpLen > 0 {
@@ -301,6 +325,9 @@ func (fl *follower) resolveResume(f *os.File, fi os.FileInfo) (start int64, rota
 			same = bytes.Equal(fp[:], p.fp[:])
 		}
 	}
+	if same && known && p.idKnown() && dev != p.dev {
+		fl.logf("the device number of %q changed (%d, was %d) but the inode, size and first bytes still match: resuming at offset %d", fl.path, dev, p.dev, p.offset)
+	}
 	if !same {
 		old, err := fl.findRotated(p)
 		if err != nil {
@@ -310,12 +337,15 @@ func (fl *follower) resolveResume(f *os.File, fi os.FileInfo) (start int64, rota
 			fl.logf("the file position %d belongs to was rotated away from %q while the connector was stopped: reading the rest of it, then the file now at the path from its start", p.offset, fl.path)
 			return p.offset, old, nil
 		}
-		msg := fmt.Sprintf("the file the saved position %d belongs to is not the file at the path and cannot be found: its unread tail (size unknown) is lost", p.offset)
-		if known && p.idKnown() && dev == p.dev && ino == p.ino {
+		found := fmt.Sprintf("the file at the path has inode %d, %d bytes", ino, size)
+		var msg string
+		switch {
+		case known && p.idKnown() && ino == p.ino:
 			// Same inode, different content: truncated or rewritten in place
-			// (copytruncate), or deleted and the inode reused. The old content
-			// is gone either way.
-			msg = fmt.Sprintf("the file at the path was truncated or replaced (same inode) while the connector was stopped; the content the saved position %d belongs to is gone, its unread tail (size unknown) is lost", p.offset)
+			// (copytruncate), or deleted and the inode reused.
+			msg = fmt.Sprintf("the file at the path was truncated or rewritten while the connector was stopped (same inode %d, but its size or first bytes differ from position %d); the content the position belongs to is gone and its unread tail (size unknown) is lost", ino, p.offset)
+		default:
+			msg = fmt.Sprintf("position %d belongs to a file (inode %d, at least %d bytes) that is no longer at the path and was not found; %s; its unread tail (size unknown) is lost", p.offset, p.ino, p.offset, found)
 		}
 		if err := fl.tailUnreadable(msg); err != nil {
 			return 0, nil, err
@@ -344,7 +374,7 @@ func (fl *follower) findRotated(p *position) (*os.File, error) {
 		if dev, ino, ok := fileID(info); !ok || dev != p.dev || ino != p.ino {
 			continue
 		}
-		f, err := fl.open(c.path, os.O_RDONLY, 0)
+		f, err := fl.open(c.path, openFlags, 0)
 		if err != nil {
 			continue
 		}
@@ -385,6 +415,33 @@ func (fl *follower) next(ctx context.Context) (line string, num, offset int64, e
 	}
 }
 
+// defaultMaxLineSize is the longest line read when none is configured.
+const defaultMaxLineSize = 16 << 20
+
+// readLine reads up to and including the next newline. A line longer than the
+// limit (with the bytes already pending) is an error: it is never cut. The
+// bytes read so far are not consumed from the follower's accounting, so after
+// the error the position is still at the start of the line.
+func (fl *follower) readLine() (line string, rerr, tooLong error) {
+	var buf []byte
+	for {
+		chunk, err := fl.r.ReadSlice('\n')
+		if len(buf) == 0 && err == nil && int64(len(chunk))+int64(len(fl.partial)) <= fl.maxLine {
+			return string(chunk), nil, nil // the common case: one slice, no copy of its own
+		}
+		buf = append(buf, chunk...)
+		if int64(len(buf))+int64(len(fl.partial)) > fl.maxLine {
+			return "", nil, fl.coded(ErrCodeLineTooLong,
+				fmt.Sprintf("a line at offset %d is longer than maxLineSize (%d bytes)", fl.offset, fl.maxLine),
+				"raise maxLineSize, or fix the writer; the source does not truncate lines", nil)
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return string(buf), err, nil
+	}
+}
+
 // position returns the saved position after the line most recently returned.
 func (fl *follower) position() string {
 	fl.mu.Lock()
@@ -414,13 +471,15 @@ func (fl *follower) emit(raw string, complete bool) (line string, num, offset in
 	prevOffset := fl.offset
 	fl.offset += int64(len(raw))
 	if err := fl.updateHead(); err != nil {
-		if fl.switching == switchTruncated && errors.Is(err, io.ErrUnexpectedEOF) {
-			// The bytes of this tail are gone (the file was truncated under
-			// us). Return it anyway, with a fingerprint that matches nothing,
-			// so a restart from this position reads the file from its start.
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			// The first bytes are gone: the file was truncated under us (the
+			// next refill of the buffer notices). Return the line anyway, with a
+			// fingerprint that matches nothing, so a restart from this position
+			// stops instead of resuming in a different file.
+			// fl.head stays the fingerprint of the old content (the copy of a
+			// copytruncate is recognized by it).
 			n := min(fl.offset, fingerprintSize)
-			fl.headLen, fl.head = n, [sha256.Size]byte{}
-			fl.suffix = posSuffix(fl.dev, fl.ino, n, fl.head)
+			fl.suffix = posSuffix(fl.dev, fl.ino, n, [sha256.Size]byte{})
 		} else {
 			fl.offset = prevOffset // nothing was consumed: the bytes stay pending
 			return "", 0, 0, false, err
@@ -453,6 +512,8 @@ func (fl *follower) updateHead() error {
 
 // step makes one attempt to produce a line. ok is false when there is nothing
 // to return yet. idle counts the waits since the last line.
+//
+//nolint:gocyclo // one sequence of cases: poll, check, read, flush, switch
 func (fl *follower) step(idle int) (line string, num, offset int64, ok bool, err error) {
 	fl.mu.Lock()
 	defer fl.mu.Unlock()
@@ -481,7 +542,10 @@ func (fl *follower) step(idle int) (line string, num, offset int64, ok bool, err
 	}
 	raw, rerr := "", io.EOF
 	if fl.switching != switchTruncated { // what the old content held is gone
-		raw, rerr = fl.r.ReadString('\n')
+		var tooLong error
+		if raw, rerr, tooLong = fl.readLine(); tooLong != nil {
+			return "", 0, 0, false, tooLong
+		}
 	}
 	switch {
 	case rerr == nil:
@@ -497,7 +561,11 @@ func (fl *follower) step(idle int) (line string, num, offset int64, ok bool, err
 
 	// At the end of the file. A tail without a newline is held back until the
 	// file has been quiet, or until it can never be completed.
-	if len(fl.partial) > 0 && (fl.switching != switchNone || time.Since(fl.partialAt) >= fl.quiet) {
+	// Not when the file was truncated with unread data: then the partial bytes
+	// are the head of a line whose rest only exists in the copy (or is lost),
+	// and a piece of a line is never a record.
+	unreadLoss := fl.switching == switchTruncated && fl.truncUnread > 0
+	if len(fl.partial) > 0 && !unreadLoss && (fl.switching != switchNone || (fl.quiet > 0 && time.Since(fl.partialAt) >= fl.quiet)) {
 		return fl.emit("", false)
 	}
 	if fl.switching != switchNone {
@@ -521,19 +589,26 @@ func (fl *follower) checkTruncated() error {
 	if err != nil {
 		return fmt.Errorf("could not stat file: %w", err)
 	}
-	if fi.Size() < fl.offset+int64(len(fl.partial)) {
-		fl.switching = switchTruncated
-		return nil
+	consumed := fl.offset + int64(len(fl.partial))
+	last := fl.lastSize
+	fl.lastSize = fi.Size()
+	truncated := fi.Size() < consumed
+	if !truncated && fl.headLen > 0 {
+		fp, err := fingerprint(fl.f, fl.headLen)
+		switch {
+		case errors.Is(err, io.ErrUnexpectedEOF), err == nil && fp != fl.head:
+			truncated = true
+		case err != nil:
+			return fmt.Errorf("could not fingerprint file: %w", err)
+		}
 	}
-	if fl.headLen == 0 {
-		return nil
-	}
-	fp, err := fingerprint(fl.f, fl.headLen)
-	switch {
-	case errors.Is(err, io.ErrUnexpectedEOF), err == nil && fp != fl.head:
+	if truncated {
 		fl.switching = switchTruncated
-	case err != nil:
-		return fmt.Errorf("could not fingerprint file: %w", err)
+		// What was in the file past our position when we last looked is gone
+		// with the truncation: lines written but never read.
+		if last > consumed {
+			fl.truncUnread = last - consumed
+		}
 	}
 	return nil
 }
@@ -544,7 +619,7 @@ func (fl *follower) checkTruncated() error {
 // away again before the followed file is finished. step first reads whatever the
 // old file still has and then calls doSwitch.
 func (fl *follower) pollPath() error {
-	f, err := fl.open(fl.path, os.O_RDONLY, 0)
+	f, err := fl.open(fl.path, openFlags, 0)
 	if err != nil {
 		if !isNotExist(err) {
 			return fmt.Errorf("could not re-open file: %w", err) // includes a refused symlink swap
@@ -598,9 +673,45 @@ func (fl *follower) doSwitch() error {
 	}
 	_ = fl.f.Close()
 	fl.f = nil
+	fl.finished = append(fl.finished, prev)
+	if len(fl.finished) > 1024 {
+		fl.finished = fl.finished[len(fl.finished)-1024:]
+	}
 	if kind != switchRotated {
-		fl.logf("file %q was truncated: reading it again from its start", fl.path)
 		fl.hopFrom = nil
+		if unread := fl.truncUnread; unread > 0 {
+			// The pending bytes are the head of a line that was cut by the
+			// truncation: drop them, the line is read whole from the copy or
+			// counted as lost.
+			unread += int64(len(fl.partial))
+			fl.partial = nil
+			// copytruncate with an unread tail: the data is only in the copy.
+			copyF, err := fl.findCopy()
+			if err != nil {
+				return err
+			}
+			if copyF != nil {
+				fl.logf("file %q was truncated with %d bytes unread: reading them from its copy, then the file from its start", fl.path, unread)
+				fi, err := copyF.Stat()
+				if err != nil {
+					copyF.Close()
+					return fmt.Errorf("could not stat file: %w", err)
+				}
+				start := fl.offset
+				fl.install(copyF, fi, start)
+				if _, err := copyF.Seek(start, io.SeekStart); err != nil {
+					copyF.Close()
+					return fmt.Errorf("could not seek to %d in the copy: %w", start, err)
+				}
+				fl.switching = switchRotated
+				return nil
+			}
+			msg := fmt.Sprintf("the file was truncated (copytruncate) while at least %d bytes past offset %d had been written but not read; they are lost", unread, fl.offset)
+			if err := fl.tailUnreadable(msg); err != nil {
+				return err
+			}
+		}
+		fl.logf("file %q was truncated: reading it again from its start", fl.path)
 		_, err := fl.tryOpen()
 		return err
 	}

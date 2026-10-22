@@ -31,6 +31,10 @@ type got struct {
 	num, pos int64
 }
 
+// immediate is a quiet period so short that a partial last line is returned at
+// once; the default (0) holds it.
+const immediate = time.Nanosecond
+
 // nf builds a follower that resumes at a legacy offset (0: from the start) and
 // returns partial lines at once.
 func nf(path string, open Opener, offset int64) *follower {
@@ -38,7 +42,7 @@ func nf(path string, open Opener, offset int64) *follower {
 	if offset > 0 {
 		p = &position{offset: offset, legacy: true}
 	}
-	return newFollower(path, open, p, 0, nil)
+	return newFollower(path, open, p, immediate, nil)
 }
 
 func newTestFollower(t *testing.T, path string, offset int64) *follower {
@@ -79,7 +83,7 @@ func readAll(t *testing.T, fl *follower, n int) []got {
 
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil { //nolint:gosec,nolintlint // test
 		t.Fatal(err)
 	}
 }
@@ -118,12 +122,12 @@ func TestFollower_LinesNumbersAndPositions(t *testing.T) {
 	}
 }
 
-func TestFollower_PartialLastLine_QuietZeroReturnsAtOnce(t *testing.T) {
+func TestFollower_PartialLastLine_TinyQuietReturnsAtOnce(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f.txt")
 	writeFile(t, p, "ab\ncd")
 	fl := newTestFollower(t, p, 0)
 
-	// quietPeriod 0 keeps the v0.10.x behavior: the partial line is returned at
+	// With a tiny quietPeriod the v0.10.x behavior is back: the partial line is returned at
 	// once, the rest of it later as a line of its own.
 	if g := mustNext(t, fl); g != (got{"ab", 1, 3}) {
 		t.Fatalf("got %+v", g)
@@ -373,7 +377,7 @@ func checkPositionRoundTrip(t *testing.T, content string) {
 			resumes = append(resumes, &position{offset: all[k].pos, legacy: true})
 		}
 		for _, rp := range resumes {
-			fl := newFollower(p, os.OpenFile, rp, 0, nil)
+			fl := newFollower(p, os.OpenFile, rp, immediate, nil)
 			if err := fl.start(); err != nil {
 				t.Fatalf("resume %q: %v", rp, err)
 			}

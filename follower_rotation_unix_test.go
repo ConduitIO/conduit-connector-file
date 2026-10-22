@@ -407,13 +407,13 @@ func TestSourceConfig_RotationOptions(t *testing.T) {
 	if sc.RotatedPattern != "f.txt.*" || !sc.RotationAcceptLoss || sc.QuietPeriod != 250*time.Millisecond {
 		t.Fatalf("config = %+v", sc)
 	}
-	// defaults: fail loudly, 1s
+	// defaults: fail loudly, hold partial lines (quietPeriod off), 16 MiB lines
 	src = NewSource()
 	if err := sdk.Util.ParseConfig(ctx, config.Config{"path": p}, src.Config(), Connector.NewSpecification().SourceParams); err != nil {
 		t.Fatal(err)
 	}
 	sc = src.Config().(*SourceConfig)
-	if sc.RotatedPattern != "" || sc.RotationAcceptLoss || sc.QuietPeriod != time.Second {
+	if sc.RotatedPattern != "" || sc.RotationAcceptLoss || sc.QuietPeriod != 0 || sc.MaxLineSize != 16<<20 {
 		t.Fatalf("defaults = %+v", sc)
 	}
 

@@ -32,6 +32,9 @@ const (
 	// cannot be read now (the file is gone, moved, compressed, or an unknown
 	// file sits between the rotated one and the current one).
 	ErrCodeRotationTailUnreadable = "FILE_ROTATION_TAIL_UNREADABLE"
+	// ErrCodeLineTooLong: a line is longer than maxLineSize. It is never
+	// truncated; raise the setting or fix the writer.
+	ErrCodeLineTooLong = "FILE_LINE_TOO_LONG"
 	// ErrCodeRotatedPatternDenied: the engine's policy does not allow listing
 	// the directory rotatedPattern points into.
 	ErrCodeRotatedPatternDenied = "FILE_ROTATED_PATTERN_DENIED"

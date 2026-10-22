@@ -18,20 +18,29 @@ doesn't exist, it will still run and wait until a file with the configured
 name is there, then it will start listening to changes and sending records.
 The file is followed by the connector itself.
 A line is read once its newline has been written; a record is never a piece
-of a line. A last line without a newline is read after it has stayed
-unchanged for `quietPeriod` (default 1s), when the file is rotated or
-truncated, or when the connector is stopped gracefully (that record is
-checkpointed); data appended to such a line later becomes a record of its
-own.
+of a line. A last line without a newline is held until its newline is
+written, the file is rotated, or the connector is stopped gracefully (that
+record is checkpointed); data appended to such a line later becomes a record
+of its own. For writers that never terminate their last line, set
+`quietPeriod` (off by default) and the line is also read once the file has
+not changed for that long.
+A line longer than `maxLineSize` (default 16 MiB) stops the source with
+FILE_LINE_TOO_LONG; lines are never truncated. A path that is not a regular
+file (a FIFO, a device) is refused.
 When the file is rotated (renamed, removed or replaced) the source reads the
 old file to its end and then the new file from its first byte. When the file
-is truncated (copytruncate) it is read again from its start.
+is truncated (copytruncate) it is read again from its start; lines that
+were written but not yet read when it was truncated now exist only in the
+copy: with `rotatedPattern` the source finds the copy by its first bytes and
+reads them from there, without it the source stops with
+FILE_ROTATION_TAIL_UNREADABLE.
 The source never skips the unread data of a rotated file silently. If it
 cannot account for it, it stops with error code FILE_ROTATION_TAIL_UNREADABLE
 (naming the path and the fix). That happens when the file the saved position
 belongs to cannot be found after a restart (deleted, compressed, moved
-away, or truncated in place), and when a file was written between the rotated file and the current
-one that the source never saw at the path (two rotations in a row). Set
+away, or truncated in place), when a file was written between the rotated
+file and the current one that the source never saw at the path (two
+rotations in a row), and when a file is truncated with unread data in it. Set
 `rotatedPattern`, a glob such as `app.log.*`, and the source finds the
 rotation chain itself, orders it by modification time and reads each file
 in turn: the old file's tail, the files in between from their first byte,
@@ -41,13 +50,17 @@ the source too. Operators who prefer to continue can set
 warning, with the size of what it skips, and carries on.
 A position records the file's identity (device, inode, a hash of its first
 4 KiB) and the byte offset. On restart the source resumes at the offset if
-the file at the path is that file; if it was rotated while the connector
+the file at the path is that file (same inode, size at least the offset and
+same first bytes; the device number may differ, it changes across remounts); if it was rotated while the connector
 was stopped it finishes the rotated-away file (found by inode next to the
 path, or among the files `rotatedPattern` matches) and then reads the new
 file from its start. Positions written by
 v0.10.x (a bare offset) are accepted if the offset is within the file and
-follows a newline; otherwise the source refuses to start with error code
-FILE_POSITION_UNVERIFIABLE. Other codes: FILE_POSITION_INVALID,
+follows a newline, with a warning (code FILE_POSITION_UNVERIFIABLE) that
+gives the offset, size, inode and modification time, because such a position
+carries no file identity: if the file was rotated while upgrading, the first
+offset bytes of the current file are skipped. Otherwise the source refuses to
+start with error code FILE_POSITION_UNVERIFIABLE. Other codes: FILE_POSITION_INVALID,
 FILE_IDENTITY_UNKNOWN. After the first record, positions are in the new
 format, which v0.10.x cannot read.
 
@@ -57,7 +70,8 @@ The Destination connector will create the file if it doesn't exist, and
 records with changes will be appended to the destination file when received.
 A file created by the connector is readable and writable by its owner only
 (mode 0600, further restricted by the process umask). The mode of an
-existing file is never changed.
+existing file is never changed: **output files created by earlier versions
+are world-readable (0644); run `chmod 600` on them after upgrading.**
 An embedding engine can supply the open function through `file.WithOpener`
 (both the source and the destination use it) and a check for the directories
 the source lists to find rotated files through `file.WithDirChecker`.<!-- /readmegen:description -->
@@ -79,13 +93,22 @@ pipelines:
           # Type: string
           # Required: yes
           path: ""
-          # QuietPeriod is how long the last line of the file, when it has no
-          # trailing newline, must stay unchanged before it is read as a record.
-          # Lines that end in a newline are read as soon as they are written. 0
-          # reads such a line at once, as versions before v0.11.0 did.
+          # MaxLineSize is the longest line, in bytes, that is read. A longer
+          # line stops the source with the error FILE_LINE_TOO_LONG; a line is
+          # never truncated.
+          # Type: int
+          # Required: no
+          maxLineSize: "16777216"
+          # QuietPeriod is opt-in and off (0) by default. By default the last
+          # line of the file, when it has no trailing newline yet, is held until
+          # its newline is written, the file is rotated or truncated, or the
+          # connector is stopped gracefully, so a record is never a piece of a
+          # line. Set a duration to also read such a line once the file has not
+          # changed for that long, for writers that never terminate their last
+          # line.
           # Type: duration
           # Required: no
-          quietPeriod: "1s"
+          quietPeriod: "0"
           # RotatedPattern is a glob that matches the rotated files of the path,
           # for example "app.log.*" (relative to the directory of path unless it
           # is absolute). Wildcards are only allowed in the last component, so
@@ -229,21 +252,29 @@ Behavior changes of the source:
 
 * **Complete lines only.** A line is read once its newline is written. Before,
   a half-written last line was read at once and the rest of it later became a
-  second record. A last line without a newline now waits `quietPeriod`
-  (default `1s`; `0` restores the old behavior), and is read earlier on
-  rotation, truncation or graceful stop.
+  second record. A last line without a newline is now held until its newline
+  is written, the file is rotated, or the connector stops gracefully.
+  `quietPeriod` (off by default) opts back in to reading such a line after it
+  has stayed unchanged for that long.
 * **Rotation is followed, and never skipped silently.** Before, rotating the
   file ended the follow silently (empty records were emitted). Now the old file
   is finished and the new one is read from its first byte. When data of a
   rotated file cannot be accounted for the source stops with
   `FILE_ROTATION_TAIL_UNREADABLE`; the new optional `rotatedPattern` (for
   example `app.log.*`) lets it find and read the whole chain, and
-  `rotation.acceptLoss: true` makes it continue with a warning instead.
+  `rotation.acceptLoss: true` makes it continue with a warning instead. A
+  copytruncate that leaves unread data behind stops the source too (with
+  `rotatedPattern` the data is read from the copy).
 * **New position format.** The first record after upgrading carries a position
   that includes the file's identity. v0.10.x cannot read it, so a downgrade
   needs the pipeline's position reset. Offset-only positions from v0.10.x are
   accepted when they are within the file and follow a newline, otherwise the
   source refuses to start (`FILE_POSITION_UNVERIFIABLE`) instead of guessing.
+* **Lines have a size limit.** `maxLineSize` (default 16 MiB): a longer line
+  stops the source with `FILE_LINE_TOO_LONG`; it is never truncated.
+* **Destination files are 0600 only when created by this version.** Output
+  files that earlier versions created are mode 0644 and keep it. **Run
+  `chmod 600` on them.**
 * **Reads go through the engine's opener** (`file.WithOpener`) on every open
   and re-open of the path; a path that is not a regular file is refused.
 
@@ -269,14 +300,19 @@ Behavior changes of the source:
   written to again after it was rotated (a writer that kept its old file
   open) can be ordered after the file it was rotated before, and a file
   rotated away and deleted before the source saw it cannot be known.
-  Timestamps of equal value are ordered by inode; on file systems with coarse
-  timestamps, two files written within one tick are not told apart.
+  Files with equal timestamps are included and ordered by the numeric suffix of
+  their name (a long suffix is a date and ascends, a short one is logrotate's
+  index and descends), then by inode. A file with an older timestamp than the
+  file before it is not found.
 * With `sdk.batch.size` or `sdk.batch.delay` set, a graceful stop does not
   deliver the unterminated last line (the SDK stops collecting when it is
   cancelled); it is read again, whole, after the restart.
 * A truncation (copytruncate) is detected by the file shrinking or its first
-  bytes changing, checked each time the read buffer is refilled; lines that
-  were copied away before the truncation but not read yet are not recovered.
+  bytes changing, checked each time the read buffer is refilled. If unread
+  data was in the file at the previous check, it exists only in the copy: with
+  `rotatedPattern` it is read from the copy (identified by its first bytes);
+  without, the source stops with `FILE_ROTATION_TAIL_UNREADABLE`. The bytes
+  written between the last check and the truncation cannot be known.
 * After a graceful stop the unterminated last line is checkpointed; if the
   writer completes that line later, the rest of it arrives as a separate
   record.
