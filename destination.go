@@ -64,8 +64,8 @@ func NewDestination() sdk.Destination {
 	return sdk.DestinationWithMiddleware(&Destination{})
 }
 
-func (d *Destination) Open(context.Context) error {
-	file, err := d.openOrCreate(d.config.Path)
+func (d *Destination) Open(ctx context.Context) error {
+	file, err := d.openOrCreate(ctx, d.config.Path)
 	if err != nil {
 		return err
 	}
@@ -135,6 +135,6 @@ const destinationFileMode = 0o600
 // destinationFileMode if it does not exist. Creation and open are one atomic
 // syscall, so there is no window between a stat and a create. The mode of an
 // already existing file is never changed.
-func (d *Destination) openOrCreate(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, destinationFileMode)
+func (d *Destination) openOrCreate(ctx context.Context, path string) (*os.File, error) {
+	return openerFrom(ctx)(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, destinationFileMode)
 }

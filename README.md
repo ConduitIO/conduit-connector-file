@@ -23,7 +23,9 @@ The Destination connector will create the file if it doesn't exist, and
 records with changes will be appended to the destination file when received.
 A file created by the connector is readable and writable by its owner only
 (mode 0600, further restricted by the process umask). The mode of an
-existing file is never changed.<!-- /readmegen:description -->
+existing file is never changed.
+An embedding engine can supply the open function through `file.WithOpener`
+(the destination uses it; the source does not).<!-- /readmegen:description -->
 
 ## Source Configuration Parameters
 
