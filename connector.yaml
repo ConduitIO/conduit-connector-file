@@ -27,7 +27,7 @@ specification:
     (mode 0600, further restricted by the process umask). The mode of an
     existing file is never changed: **output files created by earlier versions
     are world-readable (0644); run `chmod 600` on them after upgrading.**
-  version: v0.10.9
+  version: v0.10.11
   author: Meroxa, Inc.
   source:
     parameters:
