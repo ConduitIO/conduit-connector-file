@@ -28,5 +28,5 @@ func fileID(fi os.FileInfo) (dev, ino uint64, ok bool) {
 	if !isStat {
 		return 0, 0, false
 	}
-	return uint64(st.Dev), uint64(st.Ino), true //nolint:gosec,unconvert // identity bits, not arithmetic
+	return uint64(st.Dev), uint64(st.Ino), true //nolint:unconvert // identity bits, not arithmetic
 }
