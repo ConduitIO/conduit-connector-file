@@ -99,10 +99,10 @@ func gracefulStopThroughMiddleware(t *testing.T, batch map[string]string) {
 		writeFile(t, p, content)
 
 		src := NewSource()
-		// newCfg returns a fresh config each time: sdk.Util.ParseConfig fills
-		// the defaults into the map it is given, and a second parse of that
-		// map would see them as explicit settings (an explicit size without a
-		// delay waits for a full batch).
+		// newCfg returns a fresh config for each source. Since SDK v0.18.1
+		// ParseConfig no longer writes applied defaults back into the map, so
+		// this is hygiene; under v0.18.0 it was required, because a second
+		// parse saw sdk.batch.size 100 as an explicit setting (wait until full).
 		newCfg := func(quiet string) config.Config {
 			cfg := config.Config{"path": p, "quietPeriod": quiet}
 			for k, v := range batch {
