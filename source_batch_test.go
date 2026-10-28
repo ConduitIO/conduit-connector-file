@@ -78,11 +78,19 @@ func checkCoverage(t *testing.T, path, content string, start int64, recs []openc
 // delivered twice: what was delivered tiles the file from the start, and a
 // restart from the last delivered position tiles it to the end.
 func TestSource_GracefulStopThroughBatchMiddleware(t *testing.T) {
-	t.Run("batching", func(t *testing.T) { gracefulStopThroughMiddleware(t, true) })
-	t.Run("no batching", func(t *testing.T) { gracefulStopThroughMiddleware(t, false) })
+	t.Run("batching", func(t *testing.T) {
+		gracefulStopThroughMiddleware(t, map[string]string{"sdk.batch.size": "10", "sdk.batch.delay": "150ms"})
+	})
+	t.Run("no batching", func(t *testing.T) {
+		gracefulStopThroughMiddleware(t, map[string]string{"sdk.batch.size": "0", "sdk.batch.delay": "0"})
+	})
+	// The shipped defaults (SDK v0.18.0: size 100, delay 0, adaptive drain).
+	t.Run("default batching", func(t *testing.T) { gracefulStopThroughMiddleware(t, nil) })
 }
 
-func gracefulStopThroughMiddleware(t *testing.T, batching bool) {
+// gracefulStopThroughMiddleware runs the scenario with the given sdk.batch.*
+// settings; nil leaves them to the spec defaults.
+func gracefulStopThroughMiddleware(t *testing.T, batch map[string]string) {
 	t.Helper()
 	const content = "a\nb\nunterminated-tail"
 	delivered := map[int]int{} // number of records delivered before the stop -> runs
@@ -91,14 +99,18 @@ func gracefulStopThroughMiddleware(t *testing.T, batching bool) {
 		writeFile(t, p, content)
 
 		src := NewSource()
-		cfg := config.Config{
-			"path":        p,
-			"quietPeriod": "1h", // only the stop can flush the tail
+		// newCfg returns a fresh config for each source. Since SDK v0.18.1
+		// ParseConfig no longer writes applied defaults back into the map, so
+		// this is hygiene; under v0.18.0 it was required, because a second
+		// parse saw sdk.batch.size 100 as an explicit setting (wait until full).
+		newCfg := func(quiet string) config.Config {
+			cfg := config.Config{"path": p, "quietPeriod": quiet}
+			for k, v := range batch {
+				cfg[k] = v
+			}
+			return cfg
 		}
-		if batching {
-			cfg["sdk.batch.size"] = "10"
-			cfg["sdk.batch.delay"] = "150ms"
-		}
+		cfg := newCfg("1h") // only the stop can flush the tail
 		base := context.Background()
 		if err := sdk.Util.ParseConfig(base, cfg, src.Config(), Connector.NewSpecification().SourceParams); err != nil {
 			t.Fatal(err)
@@ -144,7 +156,7 @@ func gracefulStopThroughMiddleware(t *testing.T, batching bool) {
 		appendFile(t, p, "-end\n")
 		full := content + "-end\n"
 		restarted := NewSource()
-		cfg["quietPeriod"] = "0s"
+		cfg = newCfg("0s")
 		if err := sdk.Util.ParseConfig(base, cfg, restarted.Config(), Connector.NewSpecification().SourceParams); err != nil {
 			t.Fatal(err)
 		}
@@ -167,7 +179,7 @@ func gracefulStopThroughMiddleware(t *testing.T, batching bool) {
 			t.Fatalf("iteration %d: restart ended at %d of %d", i, got, len(full))
 		}
 	}
-	t.Logf("batching=%v: records delivered before the stop, by number of runs: %v", batching, delivered)
+	t.Logf("batch=%v: records delivered before the stop, by number of runs: %v", batch, delivered)
 	if delivered[3] != 0 {
 		t.Fatalf("a stop emitted the unterminated tail: %v", delivered)
 	}
