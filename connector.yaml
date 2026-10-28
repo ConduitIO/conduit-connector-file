@@ -80,7 +80,7 @@ specification:
     An embedding engine can supply the open function through `file.WithOpener`
     (both the source and the destination use it) and a check for the directories
     the source lists to find rotated files through `file.WithDirChecker`.
-  version: v0.11.0
+  version: v0.12.0
   author: Meroxa, Inc.
   source:
     parameters:
