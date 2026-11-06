@@ -5,6 +5,7 @@ go 1.26.9
 require (
 	github.com/conduitio/conduit-commons v0.12.1
 	github.com/conduitio/conduit-connector-sdk v0.18.1
+	github.com/rs/zerolog v1.35.1
 )
 
 require (
@@ -39,7 +40,6 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/oklog/run v1.2.0 // indirect
 	github.com/petermattis/goid v0.0.0-20250319124200-ccd6737f222a // indirect
-	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/samber/lo v1.53.0 // indirect
 	github.com/samber/slog-common v0.21.0 // indirect
 	github.com/samber/slog-zerolog/v2 v2.9.2 // indirect

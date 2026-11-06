@@ -63,6 +63,50 @@ func TestDestination_KeepsExistingFileMode(t *testing.T) {
 	}
 }
 
+// The committed-length file is part of the output, so it has the output's mode:
+// on creation, and again on Open when the output's mode was changed.
+func TestDestination_CommittedFileHasOutputMode(t *testing.T) {
+	old := syscall.Umask(0)
+	t.Cleanup(func() { syscall.Umask(old) })
+
+	path := filepath.Join(t.TempDir(), "out.txt")
+	d := newTestDestination(t, path)
+	writeAll(t, d, permRecord())
+	assertMode(t, committedPath(path), 0o600)
+
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	d2 := newTestDestination(t, path)
+	writeAll(t, d2, permRecord())
+	assertMode(t, committedPath(path), 0o640)
+}
+
+// An output that is not a regular file (a device, a FIFO) cannot be truncated:
+// it is written as before, without a committed-length file. /dev/null also
+// proves no committed-length file is created next to it (Open would fail).
+func TestDestination_NonRegularOutputHasNoCommittedLength(t *testing.T) {
+	d := newTestDestination(t, os.DevNull)
+	if d.committed != nil {
+		t.Fatal("committed-length file opened for a device")
+	}
+	writeAll(t, d, permRecord())
+	if _, err := os.Stat(committedPath(os.DevNull)); err == nil {
+		t.Fatal("committed-length file created next to a device")
+	}
+}
+
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %o, want %o", path, got, want)
+	}
+}
+
 func permRecord() opencdc.Record {
 	return opencdc.Record{
 		Position:  opencdc.Position("p"),

@@ -16,8 +16,8 @@ package file
 
 import "fmt"
 
-// Stable error codes of the source. They are part of the connector's public
-// contract: tooling and agents match on them.
+// Stable error codes of the source and the destination. They are part of the
+// connector's public contract: tooling and agents match on them.
 const (
 	// ErrCodePositionInvalid: the saved position is not a position this
 	// connector wrote (neither an offset nor a versioned position).
@@ -41,13 +41,22 @@ const (
 	// ErrCodeRotatedPatternInvalid: rotatedPattern is not a valid glob, or has
 	// a wildcard in its directory part.
 	ErrCodeRotatedPatternInvalid = "FILE_ROTATED_PATTERN_INVALID"
+	// ErrCodeCommittedLengthMismatch: the destination's committed-length file
+	// (<path>.committed) does not describe the output file: the output is
+	// shorter than the committed length, or the committed length does not end a
+	// line. The output was truncated or replaced outside the connector, so the
+	// destination does not guess which bytes to keep.
+	ErrCodeCommittedLengthMismatch = "FILE_COMMITTED_LENGTH_MISMATCH"
+	// ErrCodeCommittedLengthInvalid: the destination's committed-length file is
+	// not 0 or 8 bytes long, or holds a length that is out of range.
+	ErrCodeCommittedLengthInvalid = "FILE_COMMITTED_LENGTH_INVALID"
 )
 
 // CodedError is an error with a stable code, the failing setting and a
 // suggested fix.
 type CodedError struct {
 	Code string
-	// Path is the configured source path ("path").
+	// Path is the configured path ("path") of the source or destination.
 	Path string
 	Msg  string
 	Fix  string
