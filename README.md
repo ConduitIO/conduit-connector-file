@@ -167,13 +167,17 @@ this version again.
 
 Windows: the destination is compile-checked on Windows but not tested
 there. The output and `<path>.committed` are flushed with FlushFileBuffers;
-the directory is not flushed (NTFS journals file creation), and a
-`<path>.committed` that is a symlink is refused by a check before and after
-it is opened rather than by the open itself.
+the directory is not flushed (NTFS journals file creation).
+`<path>.committed` is opened without following a reparse point (a
+symlink, a junction), and one is refused by the opened handle's
+attributes; for that it is opened directly, not through `file.WithOpener`.
+On platforms that are neither unix nor Windows, a destination writing a
+regular file fails to open: the connector cannot open `<path>.committed`
+there without following a symlink.
 
 An embedding engine can supply the open function through `file.WithOpener`
 (both the source and the destination use it, the destination also for
-`<path>.committed`) and a check for the directories
+`<path>.committed`, except on Windows) and a check for the directories
 the source lists to find rotated files through `file.WithDirChecker`.<!-- /readmegen:description -->
 
 ## Source Configuration Parameters
