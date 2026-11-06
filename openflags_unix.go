@@ -31,6 +31,25 @@ const openFlags = os.O_RDONLY | syscall.O_NONBLOCK
 // connector's own and is never a link.
 const committedOpenFlags = os.O_CREATE | os.O_RDWR | syscall.O_NOFOLLOW
 
+// committedViaOpener tells whether the committed-length file is opened
+// through the engine's Opener (on unix it is, with committedOpenFlags).
+const committedViaOpener = true
+
+// openCommittedNoFollow opens (or creates, with perm) the committed-length
+// file at cpath through open, refusing a symlink in the open itself.
+func openCommittedNoFollow(open Opener, cpath string, perm os.FileMode) (*os.File, error) {
+	c, err := open(cpath, committedOpenFlags, perm)
+	if err != nil {
+		// The open already refused; the Lstat only names why (ELOOP on
+		// Linux and macOS, EMLINK on FreeBSD).
+		if li, lerr := os.Lstat(cpath); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
+			return nil, errCommittedIsLink
+		}
+		return nil, err
+	}
+	return c, nil
+}
+
 // syncDir fsyncs the directory dir, so that the entries of files created in
 // it survive an operating-system crash or a power loss.
 func syncDir(dir string) error {

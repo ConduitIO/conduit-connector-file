@@ -22,16 +22,20 @@ import (
 	"testing"
 )
 
+// openCall is one call of an Opener.
+type openCall struct {
+	path string
+	flag int
+	perm os.FileMode
+}
+
 // Every file the destination opens goes through the engine's opener: the
-// output (for appending), the output again (to read and cut back its tail) and the
-// committed-length file next to it.
+// output (for appending), the output again (to read and cut back its tail) and,
+// on unix, the committed-length file next to it (on Windows it is opened with
+// CreateFile so that a reparse point is refused by the open itself).
 func TestDestination_UsesContextOpener(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.txt")
-	type call struct {
-		path string
-		flag int
-		perm os.FileMode
-	}
+	type call = openCall
 	var got []call
 	ctx := WithOpener(context.Background(), func(p string, flag int, perm os.FileMode) (*os.File, error) {
 		got = append(got, call{p, flag, perm})
@@ -47,7 +51,9 @@ func TestDestination_UsesContextOpener(t *testing.T) {
 	want := []call{
 		{path, os.O_CREATE | os.O_APPEND | os.O_WRONLY, 0o600},
 		{path, openFlags | os.O_RDWR, 0},
-		{path + ".committed", committedOpenFlags, 0o600 &^ umask(t)},
+	}
+	if c, ok := wantCommittedOpen(path+".committed", 0o600&^umask(t)); ok {
+		want = append(want, c)
 	}
 	if len(got) != len(want) {
 		t.Fatalf("opener got %+v, want %+v", got, want)

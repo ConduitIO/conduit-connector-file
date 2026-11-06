@@ -218,17 +218,14 @@ func openCommittedFile(open Opener, path string, perm os.FileMode) (_ *os.File, 
 			Fix:  fmt.Sprintf("remove %q (the destination creates it again); the output is kept up to its last complete line", cpath),
 		}
 	}
-	// Refuse a symlink before the open too: where the open cannot refuse one
-	// (no O_NOFOLLOW, on Windows), creating through a dangling link would
-	// create its target.
-	if li, lerr := os.Lstat(cpath); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
+	// The open itself refuses a link (O_NOFOLLOW on unix, the handle's
+	// reparse-point attribute on Windows), so no path is checked after it
+	// and nothing can be swapped in between a check and the open.
+	c, err := openCommittedNoFollow(open, cpath, perm)
+	if errors.Is(err, errCommittedIsLink) {
 		return nil, nil, notOwn("a symlink")
 	}
-	c, err := open(cpath, committedOpenFlags, perm)
 	if err != nil {
-		if li, lerr := os.Lstat(cpath); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
-			return nil, nil, notOwn("a symlink")
-		}
 		return nil, nil, fmt.Errorf("open committed-length file %q: %w", cpath, err)
 	}
 	defer func() {
@@ -240,15 +237,16 @@ func openCommittedFile(open Opener, path string, perm os.FileMode) (_ *os.File, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("stat committed-length file %q: %w", cpath, err)
 	}
+	// Checked on the open handle, so it describes the file that is used.
 	if !cinfo.Mode().IsRegular() {
 		return nil, nil, notOwn("not a regular file")
 	}
-	// Where the open cannot refuse a symlink (no O_NOFOLLOW), check the path.
-	if li, err := os.Lstat(cpath); err == nil && (li.Mode()&os.ModeSymlink != 0 || !os.SameFile(li, cinfo)) {
-		return nil, nil, notOwn("a symlink or was replaced while it was opened")
-	}
 	return c, cinfo, nil
 }
+
+// errCommittedIsLink is returned by openCommittedNoFollow when the
+// committed-length path is a symlink (or, on Windows, any reparse point).
+var errCommittedIsLink = errors.New("committed-length file is a link")
 
 // lengthToKeep returns how many bytes of the output (r, size bytes) are kept,
 // from the committed-length file c (csize bytes).
