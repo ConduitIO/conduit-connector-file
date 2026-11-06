@@ -39,7 +39,14 @@ import (
 
 const (
 	envDestKillChild = "FILE_DESTINATION_KILL_CHILD"
-	destKillBatch    = 100
+	// envDestKillFast, set in the child, replaces the destination's fsyncs
+	// with no-ops and gives every record a pre-encoded serialization. A
+	// SIGKILL never loses the page cache, so this changes no outcome the test
+	// checks, only timing: with real fsyncs and JSON encoding the child
+	// spends most of its time outside write(2), and a kill seldom tears a
+	// line.
+	envDestKillFast = "FILE_DESTINATION_KILL_FAST"
+	destKillBatch   = 100
 )
 
 // killRecord is a record of the size a CDC record has (about 600 bytes), so a
@@ -75,13 +82,25 @@ func TestDestinationKillChildHelper(t *testing.T) {
 	}
 	ctx := context.Background()
 	d := &Destination{config: DestinationConfig{Config: Config{Path: path}}}
+	fast := os.Getenv(envDestKillFast) != ""
+	var ser killSerializer
+	if fast {
+		d.sync = func(*os.File) error { return nil }
+		d.syncDir = func(string) error { return nil }
+		ser = newKillSerializer()
+	}
 	if err := d.Open(ctx); err != nil {
 		t.Fatal(err)
 	}
 	for seq := 1; ; {
 		recs := make([]opencdc.Record, destKillBatch)
 		for i := range recs {
-			recs[i] = killRecord(seq)
+			if fast {
+				recs[i] = opencdc.Record{Key: opencdc.RawData(strconv.Itoa(seq))}
+				recs[i].SetSerializer(ser)
+			} else {
+				recs[i] = killRecord(seq)
+			}
 			seq++
 		}
 		if _, err := d.Write(ctx, recs); err != nil {
@@ -89,6 +108,25 @@ func TestDestinationKillChildHelper(t *testing.T) {
 		}
 		fmt.Printf("acked %d\n", seq-1)
 	}
+}
+
+// killSerializer encodes a record as killRecord(seq) would, from a template,
+// for seq in the record's key: no JSON encoding in the child's loop.
+type killSerializer struct{ prefix, suffix []byte }
+
+func newKillSerializer() killSerializer {
+	tmpl := killRecord(0).Bytes()
+	i := bytes.Index(tmpl, []byte(`"seq":0`))
+	if i < 0 || bytes.Count(tmpl, []byte(`"seq":0`)) != 1 {
+		panic("kill record template has no unique seq field")
+	}
+	return killSerializer{prefix: tmpl[:i+len(`"seq":`)], suffix: tmpl[i+len(`"seq":0`):]}
+}
+
+func (s killSerializer) Serialize(r opencdc.Record) ([]byte, error) {
+	b := make([]byte, 0, len(s.prefix)+len(s.suffix)+12)
+	b = append(append(b, s.prefix...), r.Key.Bytes()...)
+	return append(b, s.suffix...), nil
 }
 
 // TestDestination_SIGKILLThenReopen is the end-to-end regression test for the
@@ -100,9 +138,28 @@ func TestDestinationKillChildHelper(t *testing.T) {
 // the child had acknowledged, followed by the new record.
 //
 // Without the committed length, a kill that tears a batch leaves a partial
-// line and the reopened destination appends onto it. The test stops at the
+// line and the reopened destination appends onto it. Each mode stops at the
 // first failure, after maxKills kills or after budget, whichever comes first.
+//
+// It runs twice: "fsync" is the destination as it ships; "fast" makes the
+// child's fsyncs no-ops and its records pre-encoded (see envDestKillFast) so
+// that many kills tear a line and the cut on Open is exercised. "fsync" alone
+// tears too seldom to catch a missing cut.
 func TestDestination_SIGKILLThenReopen(t *testing.T) {
+	for _, mode := range []string{"fsync", "fast"} {
+		t.Run(mode, func(t *testing.T) {
+			// The fast child writes tens of MB in 60 ms; a shorter wait
+			// keeps each round's files small enough for 300 kills.
+			env, maxSleepMs := []string(nil), 60
+			if mode == "fast" {
+				env, maxSleepMs = []string{envDestKillFast + "=1"}, 5
+			}
+			sigkillThenReopen(t, env, maxSleepMs)
+		})
+	}
+}
+
+func sigkillThenReopen(t *testing.T, childEnv []string, maxSleepMs int) {
 	const maxKills = 300
 	budget := 60 * time.Second
 	if testing.Short() {
@@ -117,14 +174,14 @@ func TestDestination_SIGKILLThenReopen(t *testing.T) {
 		var stdout bytes.Buffer
 		cmd := exec.CommandContext(context.Background(), os.Args[0], //nolint:gosec // re-executes the test binary
 			"-test.run=^TestDestinationKillChildHelper$")
-		cmd.Env = append(os.Environ(), envDestKillChild+"="+path)
+		cmd.Env = append(append(os.Environ(), envDestKillChild+"="+path), childEnv...)
 		cmd.Stdout = &stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
 		waitForOutput(t, path)
-		randSleep(0, 60)
+		randSleep(0, maxSleepMs)
 		kill9(t, cmd)
 
 		acked := lastAcked(stdout.String())

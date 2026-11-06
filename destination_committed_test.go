@@ -73,6 +73,9 @@ func kill(d *Destination) {
 	if d.committed != nil {
 		_ = d.committed.Close()
 	}
+	if d.data != nil {
+		_ = d.data.Close()
+	}
 }
 
 func appendBytes(t *testing.T, path string, b string) {

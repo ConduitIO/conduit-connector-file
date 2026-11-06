@@ -97,3 +97,7 @@ func benchmarkWrite(b *testing.B, batchSize int) {
 func BenchmarkDestinationWrite1(b *testing.B)   { benchmarkWrite(b, 1) }
 func BenchmarkDestinationWrite10(b *testing.B)  { benchmarkWrite(b, 10) }
 func BenchmarkDestinationWrite100(b *testing.B) { benchmarkWrite(b, 100) }
+
+// BenchmarkDestinationWrite1000 shows how the per-Write fsyncs amortize over a
+// batch the size of the engine's destination write batch.
+func BenchmarkDestinationWrite1000(b *testing.B) { benchmarkWrite(b, 1000) }

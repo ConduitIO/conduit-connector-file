@@ -1,0 +1,235 @@
+// Copyright © 2026 Meroxa, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package file
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/conduitio/conduit-commons/opencdc"
+)
+
+// syncEvent is one call of the destination's sync function: which file, and
+// what the committed-length file and the output held on disk at that moment.
+type syncEvent struct {
+	file      string // "output" or "committed"
+	committed int64  // readCommitted at the time of the call
+	size      int64  // size of the output at the time of the call
+}
+
+func (e syncEvent) String() string {
+	return fmt.Sprintf("sync %s (committed %d, output %d bytes)", e.file, e.committed, e.size)
+}
+
+// recordSyncs returns a sync function for a destination on path that records
+// every call in *events and then fails with fail(file) (nil: syncs for real).
+func recordSyncs(t *testing.T, path string, events *[]syncEvent, fail func(file string) error) func(*os.File) error {
+	t.Helper()
+	return func(f *os.File) error {
+		var which string
+		switch f.Name() {
+		case path:
+			which = "output"
+		case committedPath(path):
+			which = "committed"
+		default:
+			t.Fatalf("sync of unexpected file %q", f.Name())
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		*events = append(*events, syncEvent{which, readCommitted(t, path), info.Size()})
+		if fail != nil {
+			if err := fail(which); err != nil {
+				return err
+			}
+		}
+		return f.Sync()
+	}
+}
+
+// TestDestination_WriteSyncsOutputBeforeCommittedLength pins the durable
+// order of a Write: fsync the output, then write the committed length, then
+// fsync the committed-length file, then return (the ack). After an
+// operating-system crash the page cache of the two files reaches the disk
+// independently, so any other order can leave a length that covers bytes
+// that were lost, or an acknowledged batch only in memory.
+func TestDestination_WriteSyncsOutputBeforeCommittedLength(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	var events []syncEvent
+	d := &Destination{config: DestinationConfig{Config: Config{Path: path}}}
+	d.sync = recordSyncs(t, path, &events, nil)
+	d.syncDir = func(dir string) error {
+		if dir != filepath.Dir(path) {
+			t.Fatalf("synced directory %q, want %q", dir, filepath.Dir(path))
+		}
+		events = append(events, syncEvent{"dir", readCommitted(t, path), 0})
+		return syncDir(dir)
+	}
+	if err := d.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Teardown(context.Background()) })
+
+	// Open of a new output: the output (empty) is synced while no length is
+	// recorded yet, then the length 0 is written and synced, then the
+	// directory holding both new files.
+	wantOpen := []syncEvent{{"output", -1, 0}, {"committed", 0, 0}, {"dir", 0, 0}}
+	assertSyncs(t, "Open", events, wantOpen)
+
+	for i, recs := range [][]opencdc.Record{
+		{benchmarkRecord(1)},
+		{benchmarkRecord(2), benchmarkRecord(3), benchmarkRecord(4)},
+	} {
+		before := readCommitted(t, path)
+		events = nil
+		if n, err := d.Write(context.Background(), recs); err != nil || n != len(recs) {
+			t.Fatalf("Write %d = (%d, %v)", i, n, err)
+		}
+		size := int64(len(readFile(t, path)))
+		// The output is synced with all of the batch in it while the length
+		// still ends at the previous batch; the committed-length file is
+		// synced once it holds the new length; both before Write returned.
+		assertSyncs(t, fmt.Sprintf("Write %d", i), events, []syncEvent{
+			{"output", before, size},
+			{"committed", size, size},
+		})
+	}
+}
+
+// TestDestination_OpenSyncsCutBeforeCommittedLength: the cut on Open follows
+// the same order, so the length Open records is never ahead of the output on
+// disk.
+func TestDestination_OpenSyncsCutBeforeCommittedLength(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	d := openDest(context.Background(), t, path)
+	writeAll(t, d, benchmarkRecord(1))
+	committed := readCommitted(t, path)
+	kill(d)
+	appendBytes(t, path, `{"torn":`)
+
+	var events []syncEvent
+	d = &Destination{config: DestinationConfig{Config: Config{Path: path}}}
+	d.sync = recordSyncs(t, path, &events, nil)
+	if err := d.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Teardown(context.Background()) })
+	assertSyncs(t, "Open", events, []syncEvent{
+		{"output", committed, committed}, // already cut, length not rewritten yet
+		{"committed", committed, committed},
+	})
+}
+
+// A Write whose output or committed length cannot be made durable is not
+// acknowledged, and an output that could not be synced is never covered by a
+// new length.
+func TestDestination_WriteFailsWhenSyncFails(t *testing.T) {
+	for _, failing := range []string{"output", "committed"} {
+		t.Run(failing, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "out.jsonl")
+			var events []syncEvent
+			fail := false
+			d := &Destination{config: DestinationConfig{Config: Config{Path: path}}}
+			d.sync = recordSyncs(t, path, &events, func(file string) error {
+				if fail && file == failing {
+					return errors.New("injected sync failure")
+				}
+				return nil
+			})
+			if err := d.Open(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			writeAll(t, d, benchmarkRecord(1))
+			committed := readCommitted(t, path)
+
+			fail = true
+			n, err := d.Write(context.Background(), []opencdc.Record{benchmarkRecord(2)})
+			if err == nil || n != 0 || !strings.Contains(err.Error(), "injected sync failure") {
+				t.Fatalf("Write = (%d, %v), want (0, the sync error)", n, err)
+			}
+			if failing == "output" {
+				if got := readCommitted(t, path); got != committed {
+					t.Fatalf("committed length after a failed output sync = %d, want %d (unchanged)", got, committed)
+				}
+			}
+			fail = false
+			_ = d.Teardown(context.Background())
+			if got := readCommitted(t, path); got == -1 {
+				t.Fatal("Teardown after a failed Write cleared the committed length")
+			}
+
+			// The record that was not acknowledged is removed on Open when
+			// its length was never written, and delivered again.
+			d = newTestDestination(t, path)
+			writeAll(t, d, benchmarkRecord(2))
+			if failing == "output" {
+				assertWholeRecords(t, path, benchmarkRecord(1), benchmarkRecord(2))
+			} else {
+				// The length reached the page cache, so the record is kept
+				// and the redelivery duplicates it: at-least-once.
+				assertWholeRecords(t, path, benchmarkRecord(1), benchmarkRecord(2), benchmarkRecord(2))
+			}
+		})
+	}
+}
+
+// Open fails, and closes what it opened, when the directory cannot be synced.
+func TestDestination_OpenFailsWhenDirectorySyncFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	d := &Destination{config: DestinationConfig{Config: Config{Path: path}}}
+	d.syncDir = func(string) error { return errors.New("injected directory sync failure") }
+	err := d.Open(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "injected directory sync failure") {
+		t.Fatalf("Open = %v, want the directory sync error", err)
+	}
+	if err := d.Teardown(context.Background()); err != nil {
+		t.Fatalf("Teardown after a failed Open = %v, want nil", err)
+	}
+}
+
+func assertSyncs(t *testing.T, what string, got, want []syncEvent) {
+	t.Helper()
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("%s synced\n  %v\nwant\n  %v", what, got, want)
+	}
+}
+
+// Teardown is idempotent, and a Write after it fails without touching the
+// files.
+func TestDestination_TeardownTwiceAndWriteAfterTeardown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	d := openDest(context.Background(), t, path)
+	writeAll(t, d, benchmarkRecord(1))
+	if err := d.Teardown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Teardown(context.Background()); err != nil {
+		t.Fatalf("second Teardown = %v, want nil", err)
+	}
+	if n, err := d.Write(context.Background(), []opencdc.Record{benchmarkRecord(2)}); err == nil || n != 0 {
+		t.Fatalf("Write after Teardown = (%d, %v), want (0, error)", n, err)
+	}
+	assertWholeRecords(t, path, benchmarkRecord(1))
+	if got := readCommitted(t, path); got != -1 {
+		t.Fatalf("committed length = %d, want none after a clean Teardown", got)
+	}
+}

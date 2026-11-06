@@ -17,6 +17,7 @@
 package file
 
 import (
+	"errors"
 	"os"
 	"syscall"
 )
@@ -29,3 +30,13 @@ const openFlags = os.O_RDONLY | syscall.O_NONBLOCK
 // file without following a symlink in its last component: the file is the
 // connector's own and is never a link.
 const committedOpenFlags = os.O_CREATE | os.O_RDWR | syscall.O_NOFOLLOW
+
+// syncDir fsyncs the directory dir, so that the entries of files created in
+// it survive an operating-system crash or a power loss.
+func syncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	return errors.Join(f.Sync(), f.Close())
+}

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -46,6 +47,17 @@ type Destination struct {
 	// committed is the committed-length file (see committed.go), nil when the
 	// output is not a regular file.
 	committed *os.File
+	// data is a second, read-write descriptor of the output, kept open to
+	// fsync it (nil when the output is not a regular file). The output itself
+	// is opened for appending, and on Windows such a handle cannot be
+	// flushed; fsync acts on the file, not the descriptor, so syncing through
+	// data makes durable what was written through file.
+	data *os.File
+	// sync makes a file's written bytes durable, and syncDir a directory's
+	// entries. Nil means syncFile and syncDir; tests replace them to observe
+	// the order of the durability steps.
+	sync    func(*os.File) error
+	syncDir func(dir string) error
 	// failed is set once a Write or Teardown failed after it may have written
 	// part of a batch. The output may then hold bytes past the committed
 	// length, so Teardown keeps the length for the next Open to cut back to.
@@ -84,14 +96,28 @@ func (d *Destination) Open(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	committed, err := openCommitted(ctx, openerFrom(ctx), d.config.Path, file, d.newlineFreeFormat())
+	committed, data, err := openCommitted(ctx, openerFrom(ctx), d.config.Path, file, d.newlineFreeFormat(), d.syncer())
 	if err != nil {
 		_ = file.Close()
 		return err
 	}
+	if committed != nil {
+		// Invariant 1: a new output (or committed-length file) still exists
+		// after an operating-system crash only once its directory entry is on
+		// disk, so the directory is synced before the first ack.
+		dirSync := d.syncDir
+		if dirSync == nil {
+			dirSync = syncDir
+		}
+		if err := dirSync(filepath.Dir(d.config.Path)); err != nil {
+			_ = errors.Join(file.Close(), committed.Close(), data.Close())
+			return fmt.Errorf("fsync the directory of output file %q: %w", d.config.Path, err)
+		}
+	}
 
 	d.file = file
 	d.committed = committed
+	d.data = data
 	d.writer = bufio.NewWriterSize(file, writerBufferSize)
 	return nil
 }
@@ -100,6 +126,9 @@ func (d *Destination) Write(_ context.Context, recs []opencdc.Record) (int, erro
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	if d.file == nil {
+		return 0, fmt.Errorf("write to output file %q: the destination is not open", d.config.Path)
+	}
 	for _, r := range recs {
 		// Marshal the record once and write it plus its line terminator into the
 		// buffer. Writing the bytes and the newline separately avoids the extra
@@ -120,18 +149,18 @@ func (d *Destination) Write(_ context.Context, recs []opencdc.Record) (int, erro
 
 	// Invariant 1: ack only after the destination confirms the durable write.
 	// The SDK acks every record in this batch as soon as Write returns, so the
-	// buffered bytes must be flushed to the file (the OS page cache) before we
-	// return — otherwise a crash after ack would lose records the source already
-	// considers delivered. Flushing once here batches the flush across the whole
-	// batch instead of per record.
+	// buffered bytes must be flushed to the file before we return. Flushing
+	// once here batches the flush across the whole batch instead of per
+	// record; commit then makes the batch and its length durable.
 	if err := d.writer.Flush(); err != nil {
 		d.failed = true
 		return 0, err
 	}
-	// Invariant 1 (and 6): ack only after both the batch and the committed
-	// length that ends it are written. Until the length is recorded, the next
-	// Open treats the batch as never written and removes it, which is correct
-	// only because it was not acknowledged yet.
+	// Invariant 1 (and 3, 6): ack only after the batch and the committed
+	// length that ends it are both on disk, in that order (see commit). Until
+	// the length is durable, the next Open treats the batch as never written
+	// and removes it, which is correct only because it was not acknowledged
+	// yet.
 	if err := d.commit(); err != nil {
 		d.failed = true
 		return 0, err
@@ -150,7 +179,22 @@ func (d *Destination) newlineFreeFormat() bool {
 	return f == nil || strings.HasSuffix(*f, "/json")
 }
 
-// commit records the current length of the output as its committed length.
+// commit makes the output durable and records its current length as the
+// committed length, durably. The order is what makes the length safe to cut
+// back to after an operating-system crash or a power loss, where the page
+// cache of the output and of the committed-length file reach the disk
+// independently:
+//
+//  1. fsync the output: every byte the length will cover is on disk;
+//  2. pwrite the length;
+//  3. fsync the committed-length file;
+//  4. return, and the SDK acknowledges the batch.
+//
+// So the committed length on disk never covers bytes that are not on disk,
+// and every acknowledged byte is on disk and covered by it. After any crash
+// the length on disk is at most one batch behind the durable output, and
+// that batch was not acknowledged.
+//
 // The length is taken from the file, not counted, so it stays right if the
 // output is truncated outside the connector while it runs.
 func (d *Destination) commit() error {
@@ -161,22 +205,32 @@ func (d *Destination) commit() error {
 	if err != nil {
 		return fmt.Errorf("stat output file %q: %w", d.config.Path, err)
 	}
-	if err := writeCommitted(d.committed, info.Size()); err != nil {
-		return fmt.Errorf("record committed length in %q: %w", committedPath(d.config.Path), err)
-	}
-	return nil
+	return commitLength(d.config.Path, d.data, d.committed, info.Size(), d.syncer())
 }
 
+// syncer returns the function that makes a file durable.
+func (d *Destination) syncer() func(*os.File) error {
+	if d.sync != nil {
+		return d.sync
+	}
+	return syncFile
+}
+
+// Teardown flushes and closes the output and the committed-length file. It is
+// safe to call more than once and on a destination that was never opened; a
+// Write after Teardown fails without touching the files.
 func (d *Destination) Teardown(context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	if d.file == nil {
 		return nil
 	}
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	// Flush before close so a graceful shutdown never drops bytes that were
-	// buffered but not yet written to the file.
+	// buffered but not yet written to the file. Every Write ends with a
+	// flush and a commit, so the buffer is empty here unless a Write failed,
+	// and then failed is set and the length is kept anyway.
 	flushErr := d.writer.Flush()
 	closeErr := d.file.Close()
 	if flushErr != nil || closeErr != nil {
@@ -185,7 +239,12 @@ func (d *Destination) Teardown(context.Context) error {
 		d.failed = true
 	}
 	committedErr := d.closeCommitted()
-	return errors.Join(flushErr, closeErr, committedErr)
+	var dataErr error
+	if d.data != nil {
+		dataErr = d.data.Close()
+	}
+	d.file, d.writer, d.committed, d.data = nil, nil, nil, nil
+	return errors.Join(flushErr, closeErr, committedErr, dataErr)
 }
 
 // closeCommitted closes the committed-length file. After a clean run the output
@@ -200,7 +259,12 @@ func (d *Destination) closeCommitted() error {
 	}
 	var truncErr error
 	if !d.failed {
+		// Durable, so that an older version run after a power loss that
+		// followed this clean stop is not cut back to a stale length either.
 		truncErr = d.committed.Truncate(0)
+		if truncErr == nil {
+			truncErr = d.syncer()(d.committed)
+		}
 	}
 	return errors.Join(truncErr, d.committed.Close())
 }

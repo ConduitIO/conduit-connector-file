@@ -43,9 +43,12 @@ const (
 	ErrCodeRotatedPatternInvalid = "FILE_ROTATED_PATTERN_INVALID"
 	// ErrCodeCommittedLengthMismatch: the destination's committed-length file
 	// (<path>.committed) does not describe the output file: the output is
-	// shorter than the committed length, or the committed length does not end a
-	// line. The output was truncated or replaced outside the connector, so the
-	// destination does not guess which bytes to keep.
+	// shorter than the committed length (and not empty), or the committed
+	// length does not end a line. The destination fsyncs the output before it
+	// records a length, so a kill or an operating-system crash cannot cause
+	// this. The output was truncated, replaced or restored from a backup
+	// without its committed-length file, or the storage lost writes it had
+	// reported as synced. The destination does not guess which bytes to keep.
 	ErrCodeCommittedLengthMismatch = "FILE_COMMITTED_LENGTH_MISMATCH"
 	// ErrCodeCommittedLengthInvalid: the destination's committed-length file is
 	// not 0 or 8 bytes long, holds a length that is out of range, or is a

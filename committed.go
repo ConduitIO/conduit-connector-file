@@ -34,6 +34,21 @@ package file
 // its length only makes the length lag: Open then removes complete lines of a
 // batch that was never acknowledged, and they are delivered again.
 //
+// Durability. A kill of the process never loses the page cache, but an
+// operating-system crash or a power loss does, and the page cache of the
+// output and of the committed-length file reach the disk independently. So
+// every commit (Destination.commit and Open, through commitLength) is: fsync
+// the output, pwrite the length, fsync the committed-length file, and only
+// then acknowledge. The length on disk therefore never covers a byte that is
+// not on disk, and every acknowledged byte is on disk. After any crash the
+// length is at most one batch behind the durable output, and that batch was
+// not acknowledged: cutting it is ordinary at-least-once redelivery. A length
+// ahead of the output can only mean the output was changed outside the
+// connector, or that the storage lost writes it reported as synced; Open
+// refuses it (FILE_COMMITTED_LENGTH_MISMATCH). Open also fsyncs the output's
+// directory, so that a newly created output and committed-length file still
+// exist after a crash.
+//
 // A committed-length file of 0 bytes (or none at all) means no length is
 // recorded: the output was written by a version without this file, or the
 // destination stopped cleanly (Teardown empties the file, so a later run of an
@@ -77,13 +92,17 @@ func committedPath(path string) string { return path + committedSuffix }
 // newlineFree tells whether the configured record format can never put a
 // newline inside a record; it decides what Open may do with an output that has
 // no committed length (see lengthToKeep).
-func openCommitted(ctx context.Context, open Opener, path string, f *os.File, newlineFree bool) (*os.File, error) {
+//
+// It also returns a second, read-write descriptor of the output, which the
+// caller keeps to fsync the output (see Destination.data) and closes with it.
+// sync makes a file durable (syncFile outside tests).
+func openCommitted(ctx context.Context, open Opener, path string, f *os.File, newlineFree bool, sync func(*os.File) error) (_, _ *os.File, err error) {
 	info, err := f.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("stat output file %q: %w", path, err)
+		return nil, nil, fmt.Errorf("stat output file %q: %w", path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// The output is opened write-only for appending (as before this change,
@@ -94,26 +113,29 @@ func openCommitted(ctx context.Context, open Opener, path string, f *os.File, ne
 	// in between, and SameFile then refuses it.
 	r, err := open(path, openFlags|os.O_RDWR, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open output file %q for reading: %w", path, err)
+		return nil, nil, fmt.Errorf("open output file %q for reading: %w", path, err)
 	}
-	defer r.Close()
+	defer func() {
+		if err != nil {
+			_ = r.Close()
+		}
+	}()
 	rinfo, err := r.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("stat output file %q: %w", path, err)
+		return nil, nil, fmt.Errorf("stat output file %q: %w", path, err)
 	}
 	if !os.SameFile(info, rinfo) {
-		return nil, fmt.Errorf("output file %q was replaced while it was being opened; open the destination again", path)
+		return nil, nil, fmt.Errorf("output file %q was replaced while it was being opened; open the destination again", path)
 	}
 
 	cpath := committedPath(path)
 	perm := info.Mode().Perm()
 	c, cinfo, err := openCommittedFile(open, path, perm)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	ok := false
 	defer func() {
-		if !ok {
+		if err != nil {
 			_ = c.Close()
 		}
 	}()
@@ -121,14 +143,14 @@ func openCommitted(ctx context.Context, open Opener, path string, f *os.File, ne
 	// output may read it, and nobody else.
 	if cinfo.Mode().Perm() != perm {
 		if err := c.Chmod(perm); err != nil {
-			return nil, fmt.Errorf("set the mode of committed-length file %q to that of the output (%o): %w", cpath, perm, err)
+			return nil, nil, fmt.Errorf("set the mode of committed-length file %q to that of the output (%o): %w", cpath, perm, err)
 		}
 	}
 
 	size := info.Size()
 	keep, err := lengthToKeep(ctx, path, c, cinfo.Size(), r, size, newlineFree)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if keep < size {
 		// Invariant 6 (and 3): Open never keeps bytes past the committed
@@ -136,7 +158,7 @@ func openCommitted(ctx context.Context, open Opener, path string, f *os.File, ne
 		// appending its redelivery to them would glue a fragment and a record
 		// into one malformed line.
 		if err := r.Truncate(keep); err != nil {
-			return nil, fmt.Errorf("truncate output file %q to %d bytes: %w", path, keep, err)
+			return nil, nil, fmt.Errorf("truncate output file %q to %d bytes: %w", path, keep, err)
 		}
 		sdk.Logger(ctx).Warn().
 			Str("path", path).
@@ -147,11 +169,37 @@ func openCommitted(ctx context.Context, open Opener, path string, f *os.File, ne
 			Msg("removed the end of the output file that was written by a write that never completed " +
 				"(the connector was stopped mid-write); those records were not acknowledged and are delivered again")
 	}
-	if err := writeCommitted(c, keep); err != nil {
-		return nil, fmt.Errorf("record committed length in %q: %w", cpath, err)
+	// Invariant 1 and 5: the same durable order as every Write (see
+	// commitLength), so the length Open records never covers bytes an older
+	// version left only in the page cache, and the cut is durable before the
+	// first batch is appended.
+	if err := commitLength(path, r, c, keep, sync); err != nil {
+		return nil, nil, err
 	}
-	ok = true
-	return c, nil
+	return c, r, nil
+}
+
+// commitLength durably records n as the committed length of the output at
+// path: it fsyncs the output through data, then writes n to c, then fsyncs c.
+//
+// Invariant 1 and 5: the length is written only after every byte it covers is
+// on disk, and the caller acknowledges only after the length is on disk too.
+// Reordering these steps lets an operating-system crash leave a length that
+// covers bytes that never reached the disk (the next Open then refuses the
+// output, or keeps a fragment), or leave acknowledged records only in the
+// page cache.
+func commitLength(path string, data, c *os.File, n int64, sync func(*os.File) error) error {
+	cpath := committedPath(path)
+	if err := sync(data); err != nil {
+		return fmt.Errorf("fsync output file %q: %w", path, err)
+	}
+	if err := writeCommitted(c, n); err != nil {
+		return fmt.Errorf("record committed length in %q: %w", cpath, err)
+	}
+	if err := sync(c); err != nil {
+		return fmt.Errorf("fsync committed-length file %q: %w", cpath, err)
+	}
+	return nil
 }
 
 // openCommittedFile opens (or creates, with perm) the committed-length file of
@@ -169,6 +217,12 @@ func openCommittedFile(open Opener, path string, perm os.FileMode) (_ *os.File, 
 			Msg:  fmt.Sprintf("committed-length file %q is %s: it must be a regular file the destination created", cpath, what),
 			Fix:  fmt.Sprintf("remove %q (the destination creates it again); the output is kept up to its last complete line", cpath),
 		}
+	}
+	// Refuse a symlink before the open too: where the open cannot refuse one
+	// (no O_NOFOLLOW, on Windows), creating through a dangling link would
+	// create its target.
+	if li, lerr := os.Lstat(cpath); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, notOwn("a symlink")
 	}
 	c, err := open(cpath, committedOpenFlags, perm)
 	if err != nil {
@@ -248,13 +302,23 @@ func lengthToKeep(ctx context.Context, path string, c *os.File, csize int64, r i
 	}
 	committed := int64(u)
 
+	// The destination fsyncs the output before it records a length that
+	// covers it (commitLength), so neither a kill nor an operating-system
+	// crash can leave a length that the output does not reach or that does
+	// not end a line. What can: the output was truncated, replaced or
+	// restored from a backup without its committed-length file, or the
+	// storage lost writes it reported as synced (a disk write cache without
+	// power-loss protection, a filesystem mounted without write barriers).
 	mismatch := func(msg string) error {
 		return &CodedError{
 			Code: ErrCodeCommittedLengthMismatch,
 			Path: path,
-			Msg:  msg,
-			Fix: fmt.Sprintf("the output file was truncated or replaced outside the connector; check it, then delete %q "+
-				"to keep the output as it is up to its last complete line", cpath),
+			Msg: msg + "; the output was changed outside the connector (truncated, replaced, or restored without " +
+				"its committed-length file), or the storage lost writes it had reported as synced",
+			Fix: fmt.Sprintf("check the output file. If it holds what you expect, delete %q and restart: the output is "+
+				"kept up to its last newline (with a record format other than */json, an output that does not end with "+
+				"a newline is then refused with %s until its partial record is removed). Otherwise restore the output "+
+				"and %q together from the same backup", cpath, ErrCodeOutputTailUnterminated, cpath),
 		}
 	}
 	switch {
