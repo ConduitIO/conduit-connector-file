@@ -91,7 +91,10 @@ specification:
     or a filesystem mounted without write barriers, can still lose data the
     operating system reported as synced). Delivery is at-least-once: after a
     crash the batch that was being written, and not yet acknowledged, is
-    delivered again, so the output can hold a record twice.
+    delivered again, so the output can hold a record twice. After a failed
+    write (an I/O error, a full disk, a failed fsync) the destination refuses
+    further writes until it is opened again, so the next batch never lands
+    after part of the failed one.
 
     The fsyncs cost about the same for a batch of one record as for a batch of
     a thousand, so their cost per record falls with the batch size. The
