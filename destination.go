@@ -129,6 +129,16 @@ func (d *Destination) Write(_ context.Context, recs []opencdc.Record) (int, erro
 	if d.file == nil {
 		return 0, fmt.Errorf("write to output file %q: the destination is not open", d.config.Path)
 	}
+	// Invariant 3 and 6: after a failed Write the output may end in part of a
+	// batch, and after a failed fsync Linux may have dropped the batch's
+	// pages while a later fsync reports success. Appending another batch
+	// would glue it to the fragment and commit a length that covers bytes
+	// that are not on disk. Only Open can cut back to the committed length,
+	// so the destination refuses to write until it is opened again.
+	if d.failed {
+		return 0, fmt.Errorf("write to output file %q: an earlier write failed; the destination must be opened again "+
+			"(Open removes the unacknowledged part of the failed batch)", d.config.Path)
+	}
 	for _, r := range recs {
 		// Marshal the record once and write it plus its line terminator into the
 		// buffer. Writing the bytes and the newline separately avoids the extra

@@ -206,6 +206,50 @@ func TestDestination_OpenFailsWhenDirectorySyncFails(t *testing.T) {
 	}
 }
 
+// After a failed Write the destination refuses to write again until it is
+// reopened: the output may end in part of the failed batch, which only Open
+// can cut, and a later fsync may succeed although the failed batch's pages
+// were dropped.
+func TestDestination_WriteAfterFailedWriteIsRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	fail := false
+	var events []syncEvent
+	d := &Destination{config: DestinationConfig{Config: Config{Path: path}}}
+	d.sync = recordSyncs(t, path, &events, func(file string) error {
+		if fail && file == "output" {
+			return errors.New("injected sync failure")
+		}
+		return nil
+	})
+	if err := d.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	writeAll(t, d, benchmarkRecord(1))
+	committed := readCommitted(t, path)
+
+	fail = true
+	if n, err := d.Write(context.Background(), []opencdc.Record{benchmarkRecord(2)}); err == nil || n != 0 {
+		t.Fatalf("Write = (%d, %v), want (0, error)", n, err)
+	}
+	fail = false // the storage "recovers": a retry would now sync fine
+	sizeAfterFailure := len(readFile(t, path))
+	n, err := d.Write(context.Background(), []opencdc.Record{benchmarkRecord(2)})
+	if err == nil || n != 0 || !strings.Contains(err.Error(), "opened again") {
+		t.Fatalf("Write after a failed Write = (%d, %v), want (0, an error asking to reopen)", n, err)
+	}
+	if got := len(readFile(t, path)); got != sizeAfterFailure {
+		t.Fatalf("the refused Write changed the output: %d bytes, was %d", got, sizeAfterFailure)
+	}
+	if got := readCommitted(t, path); got != committed {
+		t.Fatalf("committed length = %d, want %d", got, committed)
+	}
+	_ = d.Teardown(context.Background())
+
+	d = newTestDestination(t, path)
+	writeAll(t, d, benchmarkRecord(2))
+	assertWholeRecords(t, path, benchmarkRecord(1), benchmarkRecord(2))
+}
+
 func assertSyncs(t *testing.T, what string, got, want []syncEvent) {
 	t.Helper()
 	if fmt.Sprint(got) != fmt.Sprint(want) {
