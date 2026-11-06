@@ -48,8 +48,15 @@ const (
 	// destination does not guess which bytes to keep.
 	ErrCodeCommittedLengthMismatch = "FILE_COMMITTED_LENGTH_MISMATCH"
 	// ErrCodeCommittedLengthInvalid: the destination's committed-length file is
-	// not 0 or 8 bytes long, or holds a length that is out of range.
+	// not 0 or 8 bytes long, holds a length that is out of range, or is a
+	// symlink or not a regular file.
 	ErrCodeCommittedLengthInvalid = "FILE_COMMITTED_LENGTH_INVALID"
+	// ErrCodeOutputTailUnterminated: the destination's output does not end
+	// with a newline, no committed length is recorded, and the configured
+	// record format can put a newline inside a record, so the end of the last
+	// complete record cannot be found. Only after a crash of v0.12.0 or
+	// earlier.
+	ErrCodeOutputTailUnterminated = "FILE_OUTPUT_TAIL_UNTERMINATED"
 )
 
 // CodedError is an error with a stable code, the failing setting and a

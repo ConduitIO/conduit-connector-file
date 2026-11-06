@@ -24,3 +24,8 @@ import (
 // openFlags opens without blocking: opening a FIFO for reading with no writer
 // would otherwise block forever before the regular-file check can refuse it.
 const openFlags = os.O_RDONLY | syscall.O_NONBLOCK
+
+// committedOpenFlags opens (or creates) the destination's committed-length
+// file without following a symlink in its last component: the file is the
+// connector's own and is never a link.
+const committedOpenFlags = os.O_CREATE | os.O_RDWR | syscall.O_NOFOLLOW

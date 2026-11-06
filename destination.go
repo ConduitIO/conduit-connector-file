@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/conduitio/conduit-commons/opencdc"
@@ -83,7 +84,7 @@ func (d *Destination) Open(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	committed, err := openCommitted(ctx, openerFrom(ctx), d.config.Path, file)
+	committed, err := openCommitted(ctx, openerFrom(ctx), d.config.Path, file, d.newlineFreeFormat())
 	if err != nil {
 		_ = file.Close()
 		return err
@@ -139,6 +140,16 @@ func (d *Destination) Write(_ context.Context, recs []opencdc.Record) (int, erro
 	return len(recs), nil
 }
 
+// newlineFreeFormat tells whether the configured record format can never put a
+// newline inside a record. The JSON formats (the default opencdc/json, and
+// every <converter>/json) cannot: encoding/json escapes control characters in
+// strings and emits no whitespace. Any other format may.
+func (d *Destination) newlineFreeFormat() bool {
+	f := d.config.RecordFormat
+	// The SDK's middleware sets the default before Open; nil is that default.
+	return f == nil || strings.HasSuffix(*f, "/json")
+}
+
 // commit records the current length of the output as its committed length.
 // The length is taken from the file, not counted, so it stays right if the
 // output is truncated outside the connector while it runs.
@@ -167,10 +178,12 @@ func (d *Destination) Teardown(context.Context) error {
 	// Flush before close so a graceful shutdown never drops bytes that were
 	// buffered but not yet written to the file.
 	flushErr := d.writer.Flush()
-	if flushErr != nil {
+	closeErr := d.file.Close()
+	if flushErr != nil || closeErr != nil {
+		// The output may not have been finished cleanly: keep the committed
+		// length so the next Open cuts back to it.
 		d.failed = true
 	}
-	closeErr := d.file.Close()
 	committedErr := d.closeCommitted()
 	return errors.Join(flushErr, closeErr, committedErr)
 }

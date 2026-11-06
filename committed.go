@@ -73,7 +73,11 @@ func committedPath(path string) string { return path + committedSuffix }
 // returns the open committed-length file. For an output that is not a regular
 // file it returns nil and changes nothing. On error the output is unchanged
 // unless the error is from recording the length after the cut.
-func openCommitted(ctx context.Context, open Opener, path string, f *os.File) (*os.File, error) {
+//
+// newlineFree tells whether the configured record format can never put a
+// newline inside a record; it decides what Open may do with an output that has
+// no committed length (see lengthToKeep).
+func openCommitted(ctx context.Context, open Opener, path string, f *os.File, newlineFree bool) (*os.File, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("stat output file %q: %w", path, err)
@@ -103,9 +107,9 @@ func openCommitted(ctx context.Context, open Opener, path string, f *os.File) (*
 
 	cpath := committedPath(path)
 	perm := info.Mode().Perm()
-	c, err := open(cpath, os.O_CREATE|os.O_RDWR, perm)
+	c, cinfo, err := openCommittedFile(open, path, perm)
 	if err != nil {
-		return nil, fmt.Errorf("open committed-length file %q: %w", cpath, err)
+		return nil, err
 	}
 	ok := false
 	defer func() {
@@ -113,13 +117,6 @@ func openCommitted(ctx context.Context, open Opener, path string, f *os.File) (*
 			_ = c.Close()
 		}
 	}()
-	cinfo, err := c.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat committed-length file %q: %w", cpath, err)
-	}
-	if !cinfo.Mode().IsRegular() {
-		return nil, fmt.Errorf("committed-length file %q is not a regular file", cpath)
-	}
 	// The committed-length file is part of the output: whoever may read the
 	// output may read it, and nobody else.
 	if cinfo.Mode().Perm() != perm {
@@ -129,7 +126,7 @@ func openCommitted(ctx context.Context, open Opener, path string, f *os.File) (*
 	}
 
 	size := info.Size()
-	keep, err := lengthToKeep(ctx, path, c, cinfo.Size(), r, size)
+	keep, err := lengthToKeep(ctx, path, c, cinfo.Size(), r, size, newlineFree)
 	if err != nil {
 		return nil, err
 	}
@@ -157,16 +154,75 @@ func openCommitted(ctx context.Context, open Opener, path string, f *os.File) (*
 	return c, nil
 }
 
+// openCommittedFile opens (or creates, with perm) the committed-length file of
+// the output at path and returns it with its FileInfo.
+func openCommittedFile(open Opener, path string, perm os.FileMode) (_ *os.File, _ os.FileInfo, err error) {
+	cpath := committedPath(path)
+	// Defense in depth: the committed-length file is the connector's own and
+	// is never a link or anything but a regular file. Whoever can write the
+	// output's directory can write the output too, so this guards against
+	// mistakes more than against anyone.
+	notOwn := func(what string) error {
+		return &CodedError{
+			Code: ErrCodeCommittedLengthInvalid,
+			Path: path,
+			Msg:  fmt.Sprintf("committed-length file %q is %s: it must be a regular file the destination created", cpath, what),
+			Fix:  fmt.Sprintf("remove %q (the destination creates it again); the output is kept up to its last complete line", cpath),
+		}
+	}
+	c, err := open(cpath, committedOpenFlags, perm)
+	if err != nil {
+		if li, lerr := os.Lstat(cpath); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
+			return nil, nil, notOwn("a symlink")
+		}
+		return nil, nil, fmt.Errorf("open committed-length file %q: %w", cpath, err)
+	}
+	defer func() {
+		if err != nil {
+			_ = c.Close()
+		}
+	}()
+	cinfo, err := c.Stat()
+	if err != nil {
+		return nil, nil, fmt.Errorf("stat committed-length file %q: %w", cpath, err)
+	}
+	if !cinfo.Mode().IsRegular() {
+		return nil, nil, notOwn("not a regular file")
+	}
+	// Where the open cannot refuse a symlink (no O_NOFOLLOW), check the path.
+	if li, err := os.Lstat(cpath); err == nil && (li.Mode()&os.ModeSymlink != 0 || !os.SameFile(li, cinfo)) {
+		return nil, nil, notOwn("a symlink or was replaced while it was opened")
+	}
+	return c, cinfo, nil
+}
+
 // lengthToKeep returns how many bytes of the output (r, size bytes) are kept,
 // from the committed-length file c (csize bytes).
-func lengthToKeep(ctx context.Context, path string, c *os.File, csize int64, r io.ReaderAt, size int64) (int64, error) {
+func lengthToKeep(ctx context.Context, path string, c *os.File, csize int64, r io.ReaderAt, size int64, newlineFree bool) (int64, error) {
 	cpath := committedPath(path)
 	switch csize {
 	case 0:
 		// No length recorded: an output written by an earlier version, or
-		// one the destination closed cleanly. All a torn write of
-		// newline-terminated records can leave is a partial last line.
-		return lastLineEnd(r, size)
+		// one the destination closed cleanly. A clean output ends with a
+		// newline and nothing is cut. An output that does not was torn by a
+		// crash of v0.12.0 or earlier. When records cannot contain a newline,
+		// all a torn write can leave is a partial last line, so cutting after
+		// the last newline removes exactly the unacknowledged part. When they
+		// can, the last newline may be inside the torn record, and the
+		// destination does not guess.
+		keep, err := lastLineEnd(r, size)
+		if err != nil || keep == size || newlineFree {
+			return keep, err
+		}
+		return 0, &CodedError{
+			Code: ErrCodeOutputTailUnterminated,
+			Path: path,
+			Msg: fmt.Sprintf("the output file does not end with a newline and no committed length is recorded; "+
+				"the configured record format can put a newline inside a record, so the end of the last complete "+
+				"record is unknown (%d bytes follow the last newline). This only happens on the first start after "+
+				"upgrading from v0.12.0 or earlier following a crash", size-keep),
+			Fix: "inspect the end of the output file, remove the partial record (or truncate the file), then restart",
+		}
 	case committedSize:
 	default:
 		return 0, &CodedError{

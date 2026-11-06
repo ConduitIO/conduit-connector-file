@@ -102,16 +102,22 @@ specification:
     the output file's mode) and do not edit it. It holds 8 bytes while the
     destination runs and is emptied when the destination stops cleanly. When it
     is missing or empty (an output written by v0.12.0 or earlier, or after a
-    clean stop) `Open` removes only what follows the last newline, with the
-    same warning. When the output is empty but `<path>.committed` holds a
+    clean stop) and the file does not end with a newline (a crash of v0.12.0
+    or earlier), `Open` removes only what follows the last newline, with the
+    same warning, if the record format is a JSON format (the default
+    `opencdc/json`, or any `<converter>/json`): those never put a newline
+    inside a record. With any other record format a record can contain a
+    newline, so `Open` fails with FILE_OUTPUT_TAIL_UNTERMINATED instead of
+    guessing: inspect the end of the file, remove the partial record (or
+    truncate the file), then restart. When the output is empty but `<path>.committed` holds a
     length (the output was deleted or emptied), the destination starts again
     from empty with a warning. When the output is shorter than the recorded
     length, or the recorded length does not end a line, the output was
     truncated or replaced outside the connector and `Open` fails with
     FILE_COMMITTED_LENGTH_MISMATCH without changing anything: check the file,
     then delete `<path>.committed` to keep the output as it is up to its last
-    complete line. A `<path>.committed` that is not 0 or 8 bytes long fails
-    with FILE_COMMITTED_LENGTH_INVALID. A path that is not a regular file (a
+    complete line. A `<path>.committed` that is not 0 or 8 bytes long, is a
+    symlink or is not a regular file fails with FILE_COMMITTED_LENGTH_INVALID. A path that is not a regular file (a
     device such as `/dev/stdout`, a FIFO) is written as before, without
     `<path>.committed`.
 

@@ -19,3 +19,8 @@ package file
 import "os"
 
 const openFlags = os.O_RDONLY
+
+// committedOpenFlags opens (or creates) the destination's committed-length
+// file. Without O_NOFOLLOW, openCommitted refuses a symlink by an Lstat after
+// the open instead.
+const committedOpenFlags = os.O_CREATE | os.O_RDWR

@@ -47,7 +47,7 @@ func TestDestination_UsesContextOpener(t *testing.T) {
 	want := []call{
 		{path, os.O_CREATE | os.O_APPEND | os.O_WRONLY, 0o600},
 		{path, openFlags | os.O_RDWR, 0},
-		{path + ".committed", os.O_CREATE | os.O_RDWR, 0o600 &^ umask(t)},
+		{path + ".committed", committedOpenFlags, 0o600 &^ umask(t)},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("opener got %+v, want %+v", got, want)

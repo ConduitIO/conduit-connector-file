@@ -395,3 +395,80 @@ func TestDestination_WriteFailsWhenCommittedLengthFails(t *testing.T) {
 	writeAll(t, d, benchmarkRecord(2))
 	assertWholeRecords(t, path, benchmarkRecord(1), benchmarkRecord(2))
 }
+
+// Teardown that cannot close the output cleanly keeps the committed length,
+// like a failed flush: the next Open must be able to cut back to it.
+func TestDestination_TeardownKeepsCommittedLengthAfterCloseError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	var output *os.File
+	ctx := WithOpener(context.Background(), func(p string, flag int, perm os.FileMode) (*os.File, error) {
+		f, err := os.OpenFile(p, flag, perm) //nolint:gosec // test
+		if output == nil {
+			output = f // the first open is the output, for appending
+		}
+		return f, err
+	})
+	d := openDest(ctx, t, path)
+	writeAll(t, d, benchmarkRecord(1))
+	committed := readCommitted(t, path)
+
+	// Close the output under the destination: Teardown's Close then fails.
+	// The write buffer is empty, so the flush does not touch the file.
+	if err := output.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Teardown(ctx); err == nil {
+		t.Fatal("Teardown = nil, want the close error")
+	}
+	if got := readCommitted(t, path); got != committed {
+		t.Fatalf("committed length after a failed close = %d, want %d", got, committed)
+	}
+}
+
+// Without a committed length (an output of v0.12.0 after a crash), cutting
+// after the last newline is only sound when a record cannot contain one. For
+// any other record format Open refuses an output that does not end with a
+// newline, and changes nothing.
+func TestDestination_OpenWithoutCommittedLengthDependsOnFormat(t *testing.T) {
+	const torn = "{\"a\":1}\nline one of a record\nline tw"
+	cases := map[string]struct {
+		format  *string
+		content string
+		wantErr bool
+		keep    int
+	}{
+		"json format, torn":               {ptr("debezium/json"), torn, false, len("{\"a\":1}\nline one of a record\n")},
+		"other format, torn":              {ptr("other"), torn, true, 0},
+		"other format, ends in a newline": {ptr("other"), "rec\nord\n", false, len("rec\nord\n")},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "out.txt")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			d := &Destination{config: DestinationConfig{Config: Config{Path: path}}}
+			d.config.RecordFormat = tc.format
+			err := d.Open(context.Background())
+			t.Cleanup(func() { _ = d.Teardown(context.Background()) })
+			if tc.wantErr {
+				var ce *CodedError
+				if !errors.As(err, &ce) || ce.Code != ErrCodeOutputTailUnterminated || ce.Path != path {
+					t.Fatalf("Open = %v, want %s", err, ErrCodeOutputTailUnterminated)
+				}
+				if got := readFile(t, path); got != tc.content {
+					t.Fatalf("Open changed the output: %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if got := readFile(t, path); got != tc.content[:tc.keep] {
+				t.Fatalf("output = %q, want %q", got, tc.content[:tc.keep])
+			}
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }

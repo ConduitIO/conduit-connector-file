@@ -17,8 +17,11 @@
 package file
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -93,6 +96,29 @@ func TestDestination_NonRegularOutputHasNoCommittedLength(t *testing.T) {
 	writeAll(t, d, permRecord())
 	if _, err := os.Stat(committedPath(os.DevNull)); err == nil {
 		t.Fatal("committed-length file created next to a device")
+	}
+}
+
+// The committed-length file is never followed through a symlink: Open refuses
+// it and leaves the link's target alone.
+func TestDestination_RefusesSymlinkedCommittedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.txt")
+	target := filepath.Join(dir, "elsewhere")
+	if err := os.WriteFile(target, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, committedPath(path)); err != nil {
+		t.Fatal(err)
+	}
+	d := &Destination{config: DestinationConfig{Config: Config{Path: path}}}
+	err := d.Open(context.Background())
+	var ce *CodedError
+	if !errors.As(err, &ce) || ce.Code != ErrCodeCommittedLengthInvalid || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Open = %v, want %s naming the symlink", err, ErrCodeCommittedLengthInvalid)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "keep me" {
+		t.Fatalf("symlink target changed: %q", got)
 	}
 }
 
