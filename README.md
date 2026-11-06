@@ -83,14 +83,26 @@ are world-readable (0644); run `chmod 600` on them after upgrading.**
 #### Delivery semantics
 
 Each record is one line: its bytes in the configured record format and a
-newline. A batch is acknowledged only after all of its lines are written to
-the file (the operating system's page cache) and the new length of the
-file is recorded in `<path>.committed`, next to the output. Delivery is
-at-least-once: after a crash the batches that were written but not yet
-acknowledged are delivered again, so the output can hold a record twice.
-The destination does not fsync. A kill of the process never loses an
-acknowledged record, but a power loss or a kernel crash can lose
-acknowledged records the operating system had not written to disk yet.
+newline. A batch is acknowledged only after it is on disk: the destination
+writes the batch, fsyncs the output, records the new length of the output
+in `<path>.committed` (next to the output) and fsyncs that file, and only
+then returns. On `Open` it also fsyncs the output's directory, so a newly
+created output survives a crash. A kill of the process, an operating-system
+crash or a power loss therefore never loses an acknowledged record, provided
+the storage honors fsync (a disk write cache without power-loss protection,
+or a filesystem mounted without write barriers, can still lose data the
+operating system reported as synced). Delivery is at-least-once: after a
+crash the batch that was being written, and not yet acknowledged, is
+delivered again, so the output can hold a record twice.
+
+The fsyncs cost about the same for a batch of one record as for a batch of
+a thousand, so their cost per record falls with the batch size. The
+destination's `sdk.batch.size` defaults to 0 (each Write gets what the
+engine passes; under the default engine that is a whole source batch,
+`sdk.batch.size` 100 on the source). For more throughput, write larger
+batches: for example set `sdk.batch.size` to 1000 and `sdk.batch.delay`
+to `100ms` on the destination (the delay bounds how long a partial batch
+waits).
 
 A process that is killed while writing (SIGKILL, the OOM killer) can leave
 the file ending in part of a line: Linux stops a write at a page boundary
@@ -98,37 +110,63 @@ when the process is killed. On `Open` the destination cuts the file back
 to the length recorded in `<path>.committed`, and logs a warning with the
 path, the old and new size and the number of bytes removed. Those bytes are
 the start of a batch that was never acknowledged and is delivered again, so
-the next record never lands on a partial line.
+the next record never lands on a partial line. After an operating-system
+crash the recorded length can be behind the output by at most that one
+batch (the output was synced, the length was not yet), and the cut removes
+only that unacknowledged batch.
 
 `<path>.committed` is part of the output: keep it with the file (it has
-the output file's mode) and do not edit it. It holds 8 bytes while the
-destination runs and is emptied when the destination stops cleanly. When it
-is missing or empty (an output written by v0.12.0 or earlier, or after a
-clean stop) and the file does not end with a newline (a crash of v0.12.0
-or earlier), `Open` removes only what follows the last newline, with the
-same warning, if the record format is a JSON format (the default
-`opencdc/json`, or any `<converter>/json`): those never put a newline
-inside a record. With any other record format a record can contain a
+the output file's mode), back it up and restore it together with the file,
+and do not edit it. It holds 8 bytes while the destination runs and is
+emptied when the destination stops cleanly.
+
+When `<path>.committed` is missing or empty (an output written by v0.12.0
+or earlier, or after a clean stop) and the file does not end with a newline
+(a crash of v0.12.0 or earlier), `Open` can only cut after the last
+newline, and does so only if a record cannot contain one. That is decided
+by the record format's name: every format whose name ends in `/json` (the
+default `opencdc/json`, and `debezium/json`) is encoded by the SDK's JSON
+encoder, which escapes newlines inside strings and emits no whitespace, so
+`Open` removes what follows the last newline, with the same warning. With
+any other record format (for example `template`) a record can contain a
 newline, so `Open` fails with FILE_OUTPUT_TAIL_UNTERMINATED instead of
 guessing: inspect the end of the file, remove the partial record (or
-truncate the file), then restart. When the output is empty but `<path>.committed` holds a
-length (the output was deleted or emptied), the destination starts again
-from empty with a warning. When the output is shorter than the recorded
-length, or the recorded length does not end a line, the output was
-truncated or replaced outside the connector and `Open` fails with
-FILE_COMMITTED_LENGTH_MISMATCH without changing anything: check the file,
-then delete `<path>.committed` to keep the output as it is up to its last
-complete line. A `<path>.committed` that is not 0 or 8 bytes long, is a
-symlink or is not a regular file fails with FILE_COMMITTED_LENGTH_INVALID. A path that is not a regular file (a
-device such as `/dev/stdout`, a FIFO) is written as before, without
-`<path>.committed`.
+truncate the file), then restart.
+
+When the output is empty but `<path>.committed` holds a length (the output
+was deleted or emptied), the destination starts again from empty with a
+warning. When the output is shorter than the recorded length, or the
+recorded length does not end a line, `Open` fails with
+FILE_COMMITTED_LENGTH_MISMATCH without changing anything. Neither a kill
+nor an operating-system crash can cause this: the output was truncated,
+replaced or restored from a backup without its `<path>.committed`, or the
+storage lost writes it had reported as synced. Check the file. If it holds
+what you expect, delete `<path>.committed` and restart: the output is then
+kept up to its last newline, under the rule above for a missing length.
+Otherwise restore the output and `<path>.committed` together from the same
+backup. A `<path>.committed` that is not 0 or 8 bytes long, is a symlink or
+is not a regular file fails with FILE_COMMITTED_LENGTH_INVALID. A path that
+is not a regular file (a device such as `/dev/stdout`, a FIFO) is written
+as before, without `<path>.committed` and without fsync.
 
 The destination owns its output file: do not point two destinations, or
 another writer, at the same path, and do not let a source's
-`rotatedPattern` match `<path>.committed`. After running v0.12.0 or earlier
-on an output that has a non-empty `<path>.committed` (left by a crash),
-delete `<path>.committed` before starting this version again; otherwise the
-lines the older version appended are removed as unacknowledged.
+`rotatedPattern` match `<path>.committed`.
+
+Downgrading: v0.12.0 and earlier ignore `<path>.committed` and append to
+the output without updating it. After a clean stop the file is empty and
+nothing is lost when you upgrade again. After a crash it still holds a
+length, and if an older version then appends acknowledged records, the
+next `Open` of this version cuts them off as unacknowledged: those records
+are removed from the output and not delivered again. So when you go back to
+an older version after a crash, delete `<path>.committed` before starting
+this version again.
+
+Windows: the destination is compile-checked on Windows but not tested
+there. The output and `<path>.committed` are flushed with FlushFileBuffers;
+the directory is not flushed (NTFS journals file creation), and a
+`<path>.committed` that is a symlink is refused by a check before and after
+it is opened rather than by the open itself.
 
 An embedding engine can supply the open function through `file.WithOpener`
 (both the source and the destination use it, the destination also for
