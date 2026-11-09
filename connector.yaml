@@ -223,7 +223,7 @@ specification:
     (both the source and the destination use it, the destination also for
     `<path>.committed`, except on Windows) and a check for the directories
     the source lists to find rotated files through `file.WithDirChecker`.
-  version: v0.12.0
+  version: v0.13.0
   author: Meroxa, Inc.
   source:
     parameters:
