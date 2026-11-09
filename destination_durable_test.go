@@ -404,3 +404,36 @@ func TestDestination_TeardownTwiceAndWriteAfterTeardown(t *testing.T) {
 		t.Fatalf("committed length = %d, want none after a clean Teardown", got)
 	}
 }
+
+// Open on an open destination is refused without opening anything, so the
+// installed handles are neither leaked nor cut under, and they keep working.
+func TestDestination_OpenTwiceWithoutTeardown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	opens := 0
+	ctx := WithOpener(context.Background(), func(p string, flag int, perm os.FileMode) (*os.File, error) {
+		opens++
+		return os.OpenFile(p, flag, perm) //nolint:gosec // test
+	})
+	d := &Destination{config: DestinationConfig{Config: Config{Path: path}}}
+	if err := d.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Teardown(ctx) })
+	writeAll(t, d, benchmarkRecord(1))
+
+	opens = 0
+	if err := d.Open(ctx); err == nil || !strings.Contains(err.Error(), "already open") {
+		t.Fatalf("second Open = %v, want an already-open error", err)
+	}
+	if opens != 0 {
+		t.Fatalf("the refused Open opened %d files, want none", opens)
+	}
+	writeAll(t, d, benchmarkRecord(2))
+	if err := d.Teardown(ctx); err != nil {
+		t.Fatalf("Teardown = %v, want nil", err)
+	}
+	assertWholeRecords(t, path, benchmarkRecord(1), benchmarkRecord(2))
+	if got := readCommitted(t, path); got != -1 {
+		t.Fatalf("committed length = %d, want none after a clean Teardown", got)
+	}
+}

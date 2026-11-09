@@ -65,7 +65,9 @@ type Destination struct {
 	// and that Open, once it has cut, clears failed.
 	failed bool
 
-	// mu serializes access to writer, committed and failed. The SDK calls
+	// mu serializes access to file, writer, committed, data and failed, and
+	// Open holds it throughout, so a Write never sees a half-opened
+	// destination. The SDK calls
 	// Write from a single goroutine, but a bufio.Writer is not safe for
 	// concurrent use, and a batching strategy (or a future caller) can invoke
 	// Write from more than one goroutine. The mutex is uncontended on the hot
@@ -140,8 +142,18 @@ func NewDestination() sdk.Destination {
 // Open opens the output file for appending, creating it if needed. A regular
 // output file is first cut back to its committed length (see committed.go), so
 // that a batch a kill left half-written is removed before it is delivered
-// again; a warning names the bytes removed.
+// again; a warning names the bytes removed. An open destination must be torn
+// down before it is opened again: Open refuses, and leaves the open handles as
+// they are.
 func (d *Destination) Open(ctx context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// Opening over installed handles would leak them, and would cut the
+	// output back while they can still append to it.
+	if d.file != nil {
+		return fmt.Errorf("open output file %q: the destination is already open; tear it down first", d.config.Path)
+	}
+
 	file, err := d.openOrCreate(ctx, d.config.Path)
 	if err != nil {
 		return err
@@ -204,8 +216,6 @@ func (d *Destination) Open(ctx context.Context) error {
 		}
 	}
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.file = file
 	d.committed = committed
 	d.data = data
