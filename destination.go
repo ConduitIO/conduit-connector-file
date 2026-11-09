@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/conduitio/conduit-commons/opencdc"
 	sdk "github.com/conduitio/conduit-connector-sdk"
@@ -30,9 +31,9 @@ import (
 
 // writerBufferSize is the capacity of the bufio.Writer that sits between the
 // destination and the file. Buffering amortizes the write(2) syscall across
-// many records: with the default single-record delivery each flush writes one
-// line, but when the SDK batches records (sdk.batch.size) the whole batch is
-// drained in one syscall instead of one syscall per record. One CDC record
+// many records: when records are batched (sdk.batch.size, 1000 by default)
+// the whole batch is drained in one syscall instead of one syscall per
+// record. One CDC record
 // line is typically a few hundred bytes, so a full buffer holds on the order of
 // a hundred records.
 const writerBufferSize = 64 * 1024
@@ -84,8 +85,29 @@ type DestinationConfig struct {
 
 func (c DestinationConfig) Validate(context.Context) error { return c.Config.Validate() }
 
+// Default destination batching. Every Write ends with two fsyncs (see
+// commit), a fixed cost that a batch shares among its records, so the
+// destination asks for batches of up to defaultBatchSize records. The delay
+// bounds how long a partial batch waits for more records. A pipeline that sets
+// sdk.batch.size or sdk.batch.delay to 0 gets the earlier behavior.
+const (
+	defaultBatchSize  = 1000
+	defaultBatchDelay = 100 * time.Millisecond
+)
+
 func NewDestination() sdk.Destination {
-	return sdk.DestinationWithMiddleware(&Destination{})
+	return sdk.DestinationWithMiddleware(&Destination{
+		config: DestinationConfig{
+			DefaultDestinationMiddleware: sdk.DefaultDestinationMiddleware{
+				// Read by conn-sdk-cli specgen, which writes them into
+				// connector.yaml as the parameters' defaults.
+				DestinationWithBatch: sdk.DestinationWithBatch{
+					BatchSize:  defaultBatchSize,
+					BatchDelay: defaultBatchDelay,
+				},
+			},
+		},
+	})
 }
 
 // Open opens the output file for appending, creating it if needed. A regular

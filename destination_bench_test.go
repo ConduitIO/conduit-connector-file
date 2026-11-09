@@ -64,9 +64,9 @@ func newBenchDestination(b *testing.B) (*Destination, string) {
 }
 
 // benchmarkWrite measures the destination Write hot path for a given number of
-// records per Write call. batchSize 1 mirrors the engine's default (the SDK
-// calls Write with one record per call); larger batches mirror a destination
-// configured with sdk.batch.size.
+// records per Write call. batchSize 1 mirrors a pipeline that sets the
+// destination's sdk.batch.size to 0 or 1 (one record per call); 1000 is the
+// destination's default sdk.batch.size.
 func benchmarkWrite(b *testing.B, batchSize int) {
 	b.Helper()
 	d, _ := newBenchDestination(b)

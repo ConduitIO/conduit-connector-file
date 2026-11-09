@@ -257,3 +257,25 @@ func TestDestinationWriteErrorOnClosedFile(t *testing.T) {
 		t.Fatalf("write returned %d, want 0", n)
 	}
 }
+
+// The destination declares its batching defaults, and connector.yaml (the spec
+// the engine reads them from) carries the same values: the engine batches at
+// the pipeline's value, else at the spec default.
+func TestDestination_DeclaresBatchDefaults(t *testing.T) {
+	cfg, ok := NewDestination().Config().(*DestinationConfig)
+	if !ok {
+		t.Fatalf("Config() = %T, want *DestinationConfig", NewDestination().Config())
+	}
+	if cfg.BatchSize != defaultBatchSize || cfg.BatchDelay != defaultBatchDelay {
+		t.Fatalf("declared batching = (%d, %v), want (%d, %v)", cfg.BatchSize, cfg.BatchDelay, defaultBatchSize, defaultBatchDelay)
+	}
+	params := Connector.NewSpecification().DestinationParams
+	for key, want := range map[string]string{
+		"sdk.batch.size":  fmt.Sprint(defaultBatchSize),
+		"sdk.batch.delay": defaultBatchDelay.String(),
+	} {
+		if got := params[key].Default; got != want {
+			t.Errorf("connector.yaml default of %s = %q, want %q (run make generate)", key, got, want)
+		}
+	}
+}

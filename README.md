@@ -112,13 +112,15 @@ takes longer to write and sync than a smaller one, but it shares the fixed
 cost of the fsyncs among all its records, so the cost per record falls by
 orders of magnitude from batches of one record to batches of a thousand
 (`BenchmarkDestinationWrite1` to `BenchmarkDestinationWrite1000` in
-`destination_bench_test.go` measure it). The
-destination's `sdk.batch.size` defaults to 0 (each Write gets what the
-engine passes; under the default engine that is a whole source batch,
-`sdk.batch.size` 100 on the source). For more throughput, write larger
-batches: for example set `sdk.batch.size` to 1000 and `sdk.batch.delay`
-to `100ms` on the destination (the delay bounds how long a partial batch
-waits).
+`destination_bench_test.go` measure it). So the destination batches by
+default: `sdk.batch.size` defaults to 1000 and `sdk.batch.delay` to
+`100ms`. A Write gets up to 1000 records, and a partial batch waits at
+most 100ms for more, which bounds the latency batching adds. For one
+Write per batch the engine passes, as before these defaults, set both
+`sdk.batch.size` and `sdk.batch.delay` to 0 on the destination. Set both:
+with only `sdk.batch.delay` at 0 a partial batch waits until it is full,
+with no deadline, and with only `sdk.batch.size` at 0 the delay still
+batches (the engine or the SDK then picks the batch size).
 
 A process that is killed while writing (SIGKILL, the OOM killer) can leave
 the file ending in part of a line: Linux stops a write at a page boundary
@@ -324,11 +326,11 @@ pipelines:
           # destination.
           # Type: duration
           # Required: no
-          sdk.batch.delay: "0"
+          sdk.batch.delay: "100ms"
           # Maximum size of batch before it gets written to the destination.
           # Type: int
           # Required: no
-          sdk.batch.size: "0"
+          sdk.batch.size: "1000"
           # Allow bursts of at most X records (0 or less means that bursts are
           # not limited). Only takes effect if a rate limit per second is set.
           # Note that if `sdk.batch.size` is bigger than `sdk.rate.burst`, the
