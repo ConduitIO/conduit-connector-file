@@ -107,8 +107,12 @@ power loss, and the records acknowledged into it are then lost with it. On
 such a filesystem, create the output file before the pipeline first starts.
 Any other error syncing the directory fails `Open`.
 
-The fsyncs cost about the same for a batch of one record as for a batch of
-a thousand, so their cost per record falls with the batch size. The
+Every Write ends with the two fsyncs, whatever its size. A larger batch
+takes longer to write and sync than a smaller one, but it shares the fixed
+cost of the fsyncs among all its records, so the cost per record falls by
+orders of magnitude from batches of one record to batches of a thousand
+(`BenchmarkDestinationWrite1` to `BenchmarkDestinationWrite1000` in
+`destination_bench_test.go` measure it). The
 destination's `sdk.batch.size` defaults to 0 (each Write gets what the
 engine passes; under the default engine that is a whole source batch,
 `sdk.batch.size` 100 on the source). For more throughput, write larger
