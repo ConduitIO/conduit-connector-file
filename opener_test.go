@@ -22,13 +22,23 @@ import (
 	"testing"
 )
 
+// openCall is one call of an Opener.
+type openCall struct {
+	path string
+	flag int
+	perm os.FileMode
+}
+
+// Every file the destination opens goes through the engine's opener: the
+// output (for appending), the output again (to read and cut back its tail) and,
+// on unix, the committed-length file next to it (on Windows it is opened with
+// CreateFile so that a reparse point is refused by the open itself).
 func TestDestination_UsesContextOpener(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.txt")
-	var gotPath string
-	var gotFlag int
-	var gotPerm os.FileMode
+	type call = openCall
+	var got []call
 	ctx := WithOpener(context.Background(), func(p string, flag int, perm os.FileMode) (*os.File, error) {
-		gotPath, gotFlag, gotPerm = p, flag, perm
+		got = append(got, call{p, flag, perm})
 		return os.OpenFile(p, flag, perm) //nolint:gosec // test
 	})
 
@@ -38,9 +48,38 @@ func TestDestination_UsesContextOpener(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = d.Teardown(ctx) })
 
-	if gotPath != path || gotFlag != os.O_CREATE|os.O_APPEND|os.O_WRONLY || gotPerm != 0o600 {
-		t.Fatalf("opener got (%q, %#x, %o)", gotPath, gotFlag, gotPerm)
+	want := []call{
+		{path, os.O_CREATE | os.O_APPEND | os.O_WRONLY, 0o600},
+		{path, openFlags | os.O_RDWR, 0},
 	}
+	if c, ok := wantCommittedOpen(path+".committed", 0o600&^umask(t)); ok {
+		want = append(want, c)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("opener got %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("opener call %d got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// umask returns the mode bits the process umask removed from a new 0o777
+// file, so a test can predict the mode of a created output file.
+func umask(t *testing.T) os.FileMode {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "umask")
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY, 0o777)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return 0o777 &^ info.Mode().Perm()
 }
 
 func TestDestination_OpenerRefusalFailsOpen(t *testing.T) {
