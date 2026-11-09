@@ -290,6 +290,51 @@ func TestDestination_ReopenSameInstanceAfterFailedWrite(t *testing.T) {
 	assertWholeRecords(t, path, benchmarkRecord(1), benchmarkRecord(2))
 }
 
+// A clean Teardown clears the committed length durably: the committed-length
+// file is synced once it is empty, so an older version run after a power loss
+// that followed the clean stop is not cut back to a stale length. After a
+// failed Write the length is kept, and Teardown neither empties nor syncs it.
+func TestDestination_TeardownSyncsClearedCommittedLength(t *testing.T) {
+	for _, failedWrite := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failedWrite=%v", failedWrite), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "out.jsonl")
+			fail := false
+			var events []syncEvent
+			d := &Destination{config: DestinationConfig{Config: Config{Path: path}}}
+			d.sync = recordSyncs(t, path, &events, func(file string) error {
+				if fail && file == "output" {
+					return errors.New("injected sync failure")
+				}
+				return nil
+			})
+			if err := d.Open(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			writeAll(t, d, benchmarkRecord(1))
+			committed := readCommitted(t, path)
+			if failedWrite {
+				fail = true
+				if n, err := d.Write(context.Background(), []opencdc.Record{benchmarkRecord(2)}); err == nil || n != 0 {
+					t.Fatalf("Write = (%d, %v), want (0, error)", n, err)
+				}
+				fail = false
+			}
+			size := int64(len(readFile(t, path)))
+
+			events = nil
+			_ = d.Teardown(context.Background())
+			if failedWrite {
+				assertSyncs(t, "Teardown after a failed Write", events, nil)
+				if got := readCommitted(t, path); got != committed {
+					t.Fatalf("committed length = %d, want %d (kept for the next Open)", got, committed)
+				}
+				return
+			}
+			assertSyncs(t, "clean Teardown", events, []syncEvent{{"committed", -1, size}})
+		})
+	}
+}
+
 func assertSyncs(t *testing.T, what string, got, want []syncEvent) {
 	t.Helper()
 	if fmt.Sprint(got) != fmt.Sprint(want) {
