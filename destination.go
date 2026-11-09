@@ -105,12 +105,39 @@ func (d *Destination) Open(ctx context.Context) error {
 	if committed != nil {
 		// Invariant 1: a new output (or committed-length file) still exists
 		// after an operating-system crash only once its directory entry is on
-		// disk, so the directory is synced before the first ack.
+		// disk, so the directory is synced before the first ack (unless the
+		// filesystem does not support that; see below).
 		dirSync := d.syncDir
 		if dirSync == nil {
 			dirSync = syncDir
 		}
-		if err := dirSync(filepath.Dir(d.config.Path)); err != nil {
+		dir := filepath.Dir(d.config.Path)
+		switch err := dirSync(dir); {
+		case err == nil:
+		case dirSyncUnsupported(err):
+			// Some filesystems (some network and FUSE filesystems) reject
+			// an fsync of a directory as unsupported. Refusing to run there
+			// would make the destination unusable on them, so it warns and
+			// continues. What that gives up, and only that: every Write
+			// still fsyncs the output and then the committed-length file
+			// before the ack, so acknowledged bytes of a file whose
+			// directory entry is on disk are durable. But if Open just
+			// created the output, its directory entry may not be on disk
+			// yet, and an operating-system crash or a power loss before the
+			// filesystem persists it loses the whole file, with every
+			// record acknowledged into it. (A lost entry of a new
+			// committed-length file loses no data: the next Open finds no
+			// length and treats the output as one written by an older
+			// version; see lengthToKeep.)
+			sdk.Logger(ctx).Warn().
+				Str("code", ErrCodeDirSyncUnsupported).
+				Str("path", d.config.Path).
+				Str("dir", dir).
+				Err(err).
+				Msg("[" + ErrCodeDirSyncUnsupported + "] the filesystem does not support fsync on a directory; " +
+					"a newly created output file may not survive an operating-system crash or a power loss, " +
+					"and records acknowledged into it would then be lost")
+		default:
 			_ = errors.Join(file.Close(), committed.Close(), data.Close())
 			return fmt.Errorf("fsync the directory of output file %q: %w", d.config.Path, err)
 		}

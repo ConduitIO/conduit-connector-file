@@ -60,6 +60,13 @@ const (
 	// complete record cannot be found. Only after a crash of v0.12.0 or
 	// earlier.
 	ErrCodeOutputTailUnterminated = "FILE_OUTPUT_TAIL_UNTERMINATED"
+	// ErrCodeDirSyncUnsupported: the filesystem of the destination's output
+	// rejected an fsync of the output's directory as unsupported (EINVAL,
+	// ENOTSUP or EOPNOTSUPP; some network and FUSE filesystems do). It is
+	// logged as a warning, not returned: Open continues. Acknowledged bytes
+	// are still synced, but a newly created output file may not survive an
+	// operating-system crash or a power loss.
+	ErrCodeDirSyncUnsupported = "FILE_DIR_SYNC_UNSUPPORTED"
 )
 
 // CodedError is an error with a stable code, the failing setting and a

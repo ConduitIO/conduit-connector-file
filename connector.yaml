@@ -96,6 +96,15 @@ specification:
     further writes until it is opened again, so the next batch never lands
     after part of the failed one.
 
+    Some filesystems (some network and FUSE filesystems) reject an fsync of a
+    directory as unsupported (EINVAL, ENOTSUP, EOPNOTSUPP). There `Open` logs a
+    warning with code FILE_DIR_SYNC_UNSUPPORTED and the directory, and
+    continues: every batch is still synced before it is acknowledged, but a
+    newly created output file may not survive an operating-system crash or a
+    power loss, and the records acknowledged into it are then lost with it. On
+    such a filesystem, create the output file before the pipeline first starts.
+    Any other error syncing the directory fails `Open`.
+
     The fsyncs cost about the same for a batch of one record as for a batch of
     a thousand, so their cost per record falls with the batch size. The
     destination's `sdk.batch.size` defaults to 0 (each Write gets what the

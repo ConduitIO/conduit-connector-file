@@ -59,3 +59,11 @@ func syncDir(dir string) error {
 	}
 	return errors.Join(f.Sync(), f.Close())
 }
+
+// dirSyncUnsupported tells whether err from syncDir means the filesystem does
+// not support fsync on a directory, rather than that the fsync failed. Some
+// network and FUSE filesystems answer EINVAL, ENOTSUP or EOPNOTSUPP (the last
+// two are one value on Linux and differ on macOS and the BSDs).
+func dirSyncUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP)
+}
