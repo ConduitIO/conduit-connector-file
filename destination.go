@@ -60,7 +60,8 @@ type Destination struct {
 	syncDir func(dir string) error
 	// failed is set once a Write or Teardown failed after it may have written
 	// part of a batch. The output may then hold bytes past the committed
-	// length, so Teardown keeps the length for the next Open to cut back to.
+	// length, so Teardown keeps the length for the next Open to cut back to,
+	// and that Open, once it has cut, clears failed.
 	failed bool
 
 	// mu serializes access to writer, committed and failed. The SDK calls
@@ -115,10 +116,17 @@ func (d *Destination) Open(ctx context.Context) error {
 		}
 	}
 
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.file = file
 	d.committed = committed
 	d.data = data
 	d.writer = bufio.NewWriterSize(file, writerBufferSize)
+	// Invariant 3 and 6: a failed Write is forgotten only here, after Open
+	// cut the output back to its committed length and made the cut durable,
+	// so the next batch is appended to the end of the last acknowledged one
+	// and never to a fragment of the failed one. An Open that fails keeps it.
+	d.failed = false
 	return nil
 }
 

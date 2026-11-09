@@ -250,6 +250,46 @@ func TestDestination_WriteAfterFailedWriteIsRefused(t *testing.T) {
 	assertWholeRecords(t, path, benchmarkRecord(1), benchmarkRecord(2))
 }
 
+// The engine may open the same Destination again after a Teardown. That Open
+// cuts the failed batch, so it also lifts the refusal: the redelivered batch is
+// written once, after the last acknowledged one.
+func TestDestination_ReopenSameInstanceAfterFailedWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	fail := false
+	var events []syncEvent
+	d := &Destination{config: DestinationConfig{Config: Config{Path: path}}}
+	d.sync = recordSyncs(t, path, &events, func(file string) error {
+		if fail && file == "output" {
+			return errors.New("injected sync failure")
+		}
+		return nil
+	})
+	if err := d.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	writeAll(t, d, benchmarkRecord(1))
+
+	fail = true
+	if n, err := d.Write(context.Background(), []opencdc.Record{benchmarkRecord(2)}); err == nil || n != 0 {
+		t.Fatalf("Write = (%d, %v), want (0, error)", n, err)
+	}
+	fail = false
+	_ = d.Teardown(context.Background())
+	// The failed batch is in the output, past the committed length.
+	if got, committed := int64(len(readFile(t, path))), readCommitted(t, path); got <= committed {
+		t.Fatalf("output is %d bytes, want more than the committed %d (the failed batch)", got, committed)
+	}
+
+	if err := d.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Teardown(context.Background()) })
+	if n, err := d.Write(context.Background(), []opencdc.Record{benchmarkRecord(2)}); err != nil || n != 1 {
+		t.Fatalf("Write after reopening = (%d, %v), want (1, nil)", n, err)
+	}
+	assertWholeRecords(t, path, benchmarkRecord(1), benchmarkRecord(2))
+}
+
 func assertSyncs(t *testing.T, what string, got, want []syncEvent) {
 	t.Helper()
 	if fmt.Sprint(got) != fmt.Sprint(want) {
