@@ -140,8 +140,13 @@ orders of magnitude from batches of one record to batches of a thousand
 (`BenchmarkDestinationWrite1` to `BenchmarkDestinationWrite1000` in
 `destination_bench_test.go` measure it). So the destination batches by
 default: `sdk.batch.size` defaults to 1000 and `sdk.batch.delay` to
-`100ms`. A Write gets up to 1000 records, and a partial batch waits at
-most 100ms for more, which bounds the latency batching adds. For one
+`100ms`. The SDK collects the records the engine passes until at least
+1000 are pending, or until 100ms after the first of them, and then hands
+all pending records to one Write. It does not split what the engine
+passes in one call, so a Write gets fewer than 1000 records when the
+delay ends a partial batch, and 1000 or more otherwise: more when one
+call brings many records at once (a 3000-record batch from the engine is
+one Write of 3000). The delay bounds the latency batching adds. For one
 Write per batch the engine passes, as before these defaults, set both
 `sdk.batch.size` and `sdk.batch.delay` to 0 on the destination. Set both:
 with only `sdk.batch.delay` at 0 a partial batch waits until it is full,

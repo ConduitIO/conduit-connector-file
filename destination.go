@@ -32,10 +32,9 @@ import (
 // writerBufferSize is the capacity of the bufio.Writer that sits between the
 // destination and the file. Buffering amortizes the write(2) syscall across
 // many records: when records are batched (sdk.batch.size, 1000 by default)
-// the whole batch is drained in one syscall instead of one syscall per
-// record. One CDC record
-// line is typically a few hundred bytes, so a full buffer holds on the order of
-// a hundred records.
+// a batch is written in a few large syscalls, one per full buffer, instead of
+// one syscall per record. One CDC record line is typically a few hundred
+// bytes, so a full buffer holds on the order of a hundred records.
 const writerBufferSize = 64 * 1024
 
 type Destination struct {
@@ -113,8 +112,11 @@ func (c DestinationConfig) Validate(context.Context) error { return c.Config.Val
 
 // Default destination batching. Every Write ends with two fsyncs (see
 // commit), a fixed cost that a batch shares among its records, so the
-// destination asks for batches of up to defaultBatchSize records. The delay
-// bounds how long a partial batch waits for more records. A pipeline that sets
+// destination asks the SDK to batch: it calls Write once at least
+// defaultBatchSize records are pending (all of them, so a Write can get more
+// than defaultBatchSize when the engine passes many at once), or once the
+// delay has passed since the first pending record, which bounds how long a
+// partial batch waits for more. A pipeline that sets
 // both sdk.batch.size and sdk.batch.delay to 0 gets the earlier behavior, one
 // Write per batch the engine passes. Setting only one of them is not enough:
 // with only the size at 0 the SDK still batches (at its own maximum size),
