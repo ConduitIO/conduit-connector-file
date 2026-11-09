@@ -105,7 +105,7 @@ that fsync a newly created output file may not survive an operating-system
 crash or a power loss, and every record acknowledged into it would be lost
 with it. To run on such a filesystem anyway, first create the output file
 and `<path>.committed` and make their directory entries durable by other
-means, for example `touch <path> <path>.committed && sync` (or, on Linux,
+means, for example `(umask 077 && touch <path> <path>.committed) && sync` (or, on Linux,
 `sync -f <dir>` after creating them), then set
 `dirSync.acceptUnsupported: true` on the destination. `Open` then logs the
 same code as a warning and continues. Once both entries are durable the

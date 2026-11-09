@@ -199,7 +199,7 @@ func (d *Destination) Open(ctx context.Context) error {
 					"crash or a power loss", dir, unsupported.Errno),
 				Fix: fmt.Sprintf("move the output to a filesystem that supports fsync on a directory, or create the "+
 					"output file and %q and make their directory entries durable by other means (for example "+
-					"`touch <path> <path>.committed && sync`, or on Linux `sync -f %s` after creating them), then set "+
+					"`(umask 077 && touch <path> <path>.committed) && sync`, or on Linux `sync -f %s` after creating them), then set "+
 					"dirSync.acceptUnsupported to true", committedPath(d.config.Path), dir),
 				Err: err,
 			}
@@ -225,7 +225,9 @@ func (d *Destination) Open(ctx context.Context) error {
 	// Invariant 3 and 6: a failed Write is forgotten only here, after Open
 	// cut the output back to its committed length and made the cut durable,
 	// so the next batch is appended to the end of the last acknowledged one
-	// and never to a fragment of the failed one. An Open that fails keeps it.
+	// and never to a fragment of the failed one. An Open that fails installs
+	// no handles, so Write still refuses (the destination is not open), and
+	// an Open over an open destination is refused before it changes anything.
 	d.failed = false
 	return nil
 }
