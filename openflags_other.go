@@ -19,3 +19,10 @@ package file
 import "os"
 
 const openFlags = os.O_RDONLY
+
+// syncDir does nothing here. On Windows os.File.Sync is FlushFileBuffers,
+// which needs a handle opened for writing, and os.Open of a directory does not
+// give one; NTFS records the creation of a file in its metadata journal
+// instead. The output and the committed length themselves are flushed on
+// every commit. This path is compile-checked only.
+func syncDir(string) error { return nil }
