@@ -113,7 +113,10 @@ func (c DestinationConfig) Validate(context.Context) error { return c.Config.Val
 // commit), a fixed cost that a batch shares among its records, so the
 // destination asks for batches of up to defaultBatchSize records. The delay
 // bounds how long a partial batch waits for more records. A pipeline that sets
-// sdk.batch.size or sdk.batch.delay to 0 gets the earlier behavior.
+// both sdk.batch.size and sdk.batch.delay to 0 gets the earlier behavior, one
+// Write per batch the engine passes. Setting only one of them is not enough:
+// with only the size at 0 the SDK still batches (at its own maximum size),
+// and with only the delay at 0 a partial batch waits until it is full.
 const (
 	defaultBatchSize  = 1000
 	defaultBatchDelay = 100 * time.Millisecond
