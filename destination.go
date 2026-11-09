@@ -81,7 +81,31 @@ type DestinationConfig struct {
 	sdk.DefaultDestinationMiddleware
 
 	Config // embed the global config
+
+	// DirSyncAcceptUnsupported makes Open continue, with a warning, when the
+	// filesystem rejects an fsync of the output's directory as unsupported
+	// (EINVAL, ENOTSUP or EOPNOTSUPP; some network and FUSE filesystems do).
+	// By default Open then fails with FILE_DIR_SYNC_UNSUPPORTED. Without that
+	// fsync a newly created output file may not survive an operating-system
+	// crash or a power loss, and the records acknowledged into it are lost
+	// with it. Set it only after creating the output file and
+	// <path>.committed and making their directory entries durable by other
+	// means (see the connector's description).
+	DirSyncAcceptUnsupported bool `json:"dirSync.acceptUnsupported" default:"false"`
 }
+
+// dirSyncUnsupportedError is the error of syncDir when the filesystem does not
+// support fsync on a directory (see dirSyncResult). Errno names the error, for
+// example EINVAL.
+type dirSyncUnsupportedError struct {
+	Dir   string
+	Errno string
+	Err   error
+}
+
+func (e *dirSyncUnsupportedError) Error() string { return e.Err.Error() }
+
+func (e *dirSyncUnsupportedError) Unwrap() error { return e.Err }
 
 func (c DestinationConfig) Validate(context.Context) error { return c.Config.Validate() }
 
@@ -127,41 +151,53 @@ func (d *Destination) Open(ctx context.Context) error {
 	if committed != nil {
 		// Invariant 1: a new output (or committed-length file) still exists
 		// after an operating-system crash only once its directory entry is on
-		// disk, so the directory is synced before the first ack (unless the
-		// filesystem does not support that; see below).
+		// disk, so the directory is synced before the first ack (an
+		// operator can accept a filesystem that does not support that; see
+		// below).
 		dirSync := d.syncDir
 		if dirSync == nil {
 			dirSync = syncDir
 		}
 		dir := filepath.Dir(d.config.Path)
-		switch err := dirSync(dir); {
-		case err == nil:
-		case dirSyncUnsupported(err):
-			// Some filesystems (some network and FUSE filesystems) reject
-			// an fsync of a directory as unsupported. Refusing to run there
-			// would make the destination unusable on them, so it warns and
-			// continues. What that gives up, and only that: every Write
-			// still fsyncs the output and then the committed-length file
-			// before the ack, so acknowledged bytes of a file whose
-			// directory entry is on disk are durable. But if Open just
-			// created the output, its directory entry may not be on disk
-			// yet, and an operating-system crash or a power loss before the
-			// filesystem persists it loses the whole file, with every
-			// record acknowledged into it. (A lost entry of a new
-			// committed-length file loses no data: the next Open finds no
-			// length and treats the output as one written by an older
-			// version; see lengthToKeep.)
+		if err := dirSync(dir); err != nil {
+			closeAll := func() { _ = errors.Join(file.Close(), committed.Close(), data.Close()) }
+			var unsupported *dirSyncUnsupportedError
+			if !errors.As(err, &unsupported) {
+				closeAll()
+				return fmt.Errorf("fsync the directory of output file %q: %w", d.config.Path, err)
+			}
+			// Some filesystems (some network and FUSE filesystems) reject an
+			// fsync of a directory as unsupported. Every Write still fsyncs
+			// the output and then the committed-length file before the ack,
+			// but if Open just created the output, its directory entry may
+			// not be on disk yet, and an operating-system crash or a power
+			// loss before the filesystem persists it loses the whole file,
+			// with every record acknowledged into it. So Open refuses unless
+			// the operator accepted that with dirSync.acceptUnsupported.
+			coded := &CodedError{
+				Code: ErrCodeDirSyncUnsupported,
+				Path: d.config.Path,
+				Msg: fmt.Sprintf("the filesystem does not support fsync on the output's directory %q (%s), so a newly "+
+					"created output file, and the records acknowledged into it, may not survive an operating-system "+
+					"crash or a power loss", dir, unsupported.Errno),
+				Fix: fmt.Sprintf("move the output to a filesystem that supports fsync on a directory, or create the "+
+					"output file and %q and make their directory entries durable by other means (for example "+
+					"`touch <path> <path>.committed && sync`, or on Linux `sync -f %s` after creating them), then set "+
+					"dirSync.acceptUnsupported to true", committedPath(d.config.Path), dir),
+				Err: err,
+			}
+			if !d.config.DirSyncAcceptUnsupported {
+				// Invariant 1: without the opt-in, a destination that cannot
+				// make a new output durable never acknowledges into it.
+				closeAll()
+				return coded
+			}
 			sdk.Logger(ctx).Warn().
 				Str("code", ErrCodeDirSyncUnsupported).
 				Str("path", d.config.Path).
 				Str("dir", dir).
 				Err(err).
-				Msg("[" + ErrCodeDirSyncUnsupported + "] the filesystem does not support fsync on a directory; " +
-					"a newly created output file may not survive an operating-system crash or a power loss, " +
-					"and records acknowledged into it would then be lost")
-		default:
-			_ = errors.Join(file.Close(), committed.Close(), data.Close())
-			return fmt.Errorf("fsync the directory of output file %q: %w", d.config.Path, err)
+				Msg("[" + ErrCodeDirSyncUnsupported + "] " + coded.Msg + "; continuing because dirSync.acceptUnsupported is set")
 		}
 	}
 

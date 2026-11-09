@@ -255,7 +255,9 @@ func lengthToKeep(ctx context.Context, path string, c *os.File, csize int64, r i
 	switch csize {
 	case 0:
 		// No length recorded: an output written by an earlier version, or
-		// one the destination closed cleanly. A clean output ends with a
+		// one the destination closed cleanly (or, with
+		// dirSync.acceptUnsupported, one whose new committed-length file an
+		// operating-system crash lost). A clean output ends with a
 		// newline and nothing is cut. An output that does not was torn by a
 		// crash of v0.12.0 or earlier. When records cannot contain a newline,
 		// all a torn write can leave is a partial last line, so cutting after
@@ -272,7 +274,8 @@ func lengthToKeep(ctx context.Context, path string, c *os.File, csize int64, r i
 			Msg: fmt.Sprintf("the output file does not end with a newline and no committed length is recorded; "+
 				"the configured record format can put a newline inside a record, so the end of the last complete "+
 				"record is unknown (%d bytes follow the last newline). This only happens on the first start after "+
-				"upgrading from v0.12.0 or earlier following a crash", size-keep),
+				"upgrading from v0.12.0 or earlier following a crash, or, with dirSync.acceptUnsupported set, after an "+
+				"operating-system crash lost a new committed-length file", size-keep),
 			Fix: "inspect the end of the output file, remove the partial record (or truncate the file), then restart",
 		}
 	case committedSize:

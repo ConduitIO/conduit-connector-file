@@ -58,14 +58,16 @@ const (
 	// with a newline, no committed length is recorded, and the configured
 	// record format can put a newline inside a record, so the end of the last
 	// complete record cannot be found. Only after a crash of v0.12.0 or
-	// earlier.
+	// earlier, or, with dirSync.acceptUnsupported set, after an
+	// operating-system crash that lost a new committed-length file.
 	ErrCodeOutputTailUnterminated = "FILE_OUTPUT_TAIL_UNTERMINATED"
 	// ErrCodeDirSyncUnsupported: the filesystem of the destination's output
 	// rejected an fsync of the output's directory as unsupported (EINVAL,
-	// ENOTSUP or EOPNOTSUPP; some network and FUSE filesystems do). It is
-	// logged as a warning, not returned: Open continues. Acknowledged bytes
-	// are still synced, but a newly created output file may not survive an
-	// operating-system crash or a power loss.
+	// ENOTSUP or EOPNOTSUPP; some network and FUSE filesystems do), so a
+	// newly created output file, and the records acknowledged into it, may not
+	// survive an operating-system crash or a power loss. Open fails with it,
+	// unless dirSync.acceptUnsupported is set: Open then logs it as a warning
+	// and continues.
 	ErrCodeDirSyncUnsupported = "FILE_DIR_SYNC_UNSUPPORTED"
 )
 

@@ -51,19 +51,44 @@ func openCommittedNoFollow(open Opener, cpath string, perm os.FileMode) (*os.Fil
 }
 
 // syncDir fsyncs the directory dir, so that the entries of files created in
-// it survive an operating-system crash or a power loss.
+// it survive an operating-system crash or a power loss. An fsync the
+// filesystem does not support gives a *dirSyncUnsupportedError (see
+// dirSyncResult).
 func syncDir(dir string) error {
 	f, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
-	return errors.Join(f.Sync(), f.Close())
+	return dirSyncResult(dir, f.Sync(), f.Close())
 }
 
-// dirSyncUnsupported tells whether err from syncDir means the filesystem does
-// not support fsync on a directory, rather than that the fsync failed. Some
-// network and FUSE filesystems answer EINVAL, ENOTSUP or EOPNOTSUPP (the last
-// two are one value on Linux and differ on macOS and the BSDs).
-func dirSyncUnsupported(err error) bool {
-	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP)
+// dirSyncResult is the result of syncDir from the errors of the fsync and of
+// the close of dir. Only the fsync's own error is classified: when it is
+// EINVAL, ENOTSUP or EOPNOTSUPP (as some network and FUSE filesystems answer)
+// and the close succeeded, the filesystem does not support fsync on a
+// directory, and the result is a *dirSyncUnsupportedError. Any other error,
+// and any error of the close, is returned as it is, so it fails Open. ENOTSUP
+// and EOPNOTSUPP are one value on Linux and FreeBSD, named after both there,
+// and differ on macOS, OpenBSD and NetBSD.
+func dirSyncResult(dir string, syncErr, closeErr error) error {
+	if syncErr == nil || closeErr != nil {
+		return errors.Join(syncErr, closeErr)
+	}
+	notsup := "ENOTSUP"
+	if syscall.ENOTSUP == syscall.EOPNOTSUPP {
+		notsup = "ENOTSUP/EOPNOTSUPP"
+	}
+	for _, e := range []struct {
+		name  string
+		errno syscall.Errno
+	}{
+		{"EINVAL", syscall.EINVAL},
+		{notsup, syscall.ENOTSUP},
+		{"EOPNOTSUPP", syscall.EOPNOTSUPP},
+	} {
+		if errors.Is(syncErr, e.errno) {
+			return &dirSyncUnsupportedError{Dir: dir, Errno: e.name, Err: syncErr}
+		}
+	}
+	return syncErr
 }

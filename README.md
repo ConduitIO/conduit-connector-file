@@ -99,13 +99,39 @@ further writes until it is opened again, so the next batch never lands
 after part of the failed one.
 
 Some filesystems (some network and FUSE filesystems) reject an fsync of a
-directory as unsupported (EINVAL, ENOTSUP, EOPNOTSUPP). There `Open` logs a
-warning with code FILE_DIR_SYNC_UNSUPPORTED and the directory, and
-continues: every batch is still synced before it is acknowledged, but a
-newly created output file may not survive an operating-system crash or a
-power loss, and the records acknowledged into it are then lost with it. On
-such a filesystem, create the output file before the pipeline first starts.
-Any other error syncing the directory fails `Open`.
+directory as unsupported (EINVAL, ENOTSUP, EOPNOTSUPP). There `Open` fails
+with FILE_DIR_SYNC_UNSUPPORTED, naming the directory and the error: without
+that fsync a newly created output file may not survive an operating-system
+crash or a power loss, and every record acknowledged into it would be lost
+with it. To run on such a filesystem anyway, first create the output file
+and `<path>.committed` and make their directory entries durable by other
+means, for example `touch <path> <path>.committed && sync` (or, on Linux,
+`sync -f <dir>` after creating them), then set
+`dirSync.acceptUnsupported: true` on the destination. `Open` then logs the
+same code as a warning and continues. Once both entries are durable the
+missing fsync puts nothing at risk: the destination does not create, rename
+or remove either file while it exists (a clean stop empties
+`<path>.committed`, it does not remove it). If either file is deleted later,
+`Open` creates it again, and the new file is exposed as below. With the
+option set, what an operating-system crash or a power loss can do depends
+on which entries were made durable first:
+
+- If the output file's was not, the crash can lose the whole output, with
+  every record acknowledged into it.
+- If the output file's was but `<path>.committed`'s was not, the crash can
+  lose `<path>.committed`. The next `Open` then finds no committed length
+  and keeps the output up to its last newline (the rule for a missing
+  length, below). With a `*/json` record format that removes only the
+  partial last line of the batch that was being written; its complete
+  records stay and are delivered again, so they appear twice. With any
+  other record format a newline can be inside a record. If the output then
+  ends with a newline inside a record of that unacknowledged batch,
+  nothing is cut and that fragment of a record stays in the output, before
+  the redelivered batch. If it ends with no newline, `Open` fails with
+  FILE_OUTPUT_TAIL_UNTERMINATED.
+
+Any other error syncing the directory (EIO, ENOSPC, EROFS, and so on)
+always fails `Open`.
 
 Every Write ends with the two fsyncs, whatever its size. A larger batch
 takes longer to write and sync than a smaller one, but it shares the fixed
@@ -322,6 +348,19 @@ pipelines:
           # Type: string
           # Required: yes
           path: ""
+          # DirSyncAcceptUnsupported makes Open continue, with a warning, when
+          # the filesystem rejects an fsync of the output's directory as
+          # unsupported (EINVAL, ENOTSUP or EOPNOTSUPP; some network and FUSE
+          # filesystems do). By default Open then fails with
+          # FILE_DIR_SYNC_UNSUPPORTED. Without that fsync a newly created output
+          # file may not survive an operating-system crash or a power loss, and
+          # the records acknowledged into it are lost with it. Set it only after
+          # creating the output file and <path>.committed and making their
+          # directory entries durable by other means (see the connector's
+          # description).
+          # Type: bool
+          # Required: no
+          dirSync.acceptUnsupported: "false"
           # Maximum delay before an incomplete batch is written to the
           # destination.
           # Type: duration

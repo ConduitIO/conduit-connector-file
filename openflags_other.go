@@ -26,6 +26,3 @@ const openFlags = os.O_RDONLY
 // instead. The output and the committed length themselves are flushed on
 // every commit. This path is compile-checked only.
 func syncDir(string) error { return nil }
-
-// dirSyncUnsupported reports false: syncDir never fails here.
-func dirSyncUnsupported(error) bool { return false }
