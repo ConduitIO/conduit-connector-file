@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/conduitio/conduit-commons/opencdc"
@@ -288,6 +289,47 @@ func TestDestination_ReopenSameInstanceAfterFailedWrite(t *testing.T) {
 		t.Fatalf("Write after reopening = (%d, %v), want (1, nil)", n, err)
 	}
 	assertWholeRecords(t, path, benchmarkRecord(1), benchmarkRecord(2))
+}
+
+// An Open that fails does not lift the refusal after a failed Write: only an
+// Open that cut the output back to its committed length may. The second Open
+// here comes without a Teardown and fails, so the handles that hold the
+// fragment of the failed batch are still installed.
+func TestDestination_FailedOpenKeepsWriteRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	fail := false
+	var events []syncEvent
+	d := &Destination{config: DestinationConfig{Config: Config{Path: path}}}
+	d.sync = recordSyncs(t, path, &events, func(file string) error {
+		if fail && file == "output" {
+			return errors.New("injected sync failure")
+		}
+		return nil
+	})
+	if err := d.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Teardown(context.Background()) })
+	writeAll(t, d, benchmarkRecord(1))
+
+	fail = true
+	if n, err := d.Write(context.Background(), []opencdc.Record{benchmarkRecord(2)}); err == nil || n != 0 {
+		t.Fatalf("Write = (%d, %v), want (0, error)", n, err)
+	}
+	fail = false
+
+	d.syncDir = func(dir string) error { return &os.PathError{Op: "sync", Path: dir, Err: syscall.EIO} }
+	if err := d.Open(context.Background()); err == nil {
+		t.Fatal("Open = nil, want an error")
+	}
+	sizeAfterFailure := len(readFile(t, path))
+	n, err := d.Write(context.Background(), []opencdc.Record{benchmarkRecord(2)})
+	if err == nil || n != 0 || !strings.Contains(err.Error(), "an earlier write failed") {
+		t.Fatalf("Write after a failed Open = (%d, %v), want (0, the earlier-write-failed refusal)", n, err)
+	}
+	if got := len(readFile(t, path)); got != sizeAfterFailure {
+		t.Fatalf("the refused Write changed the output: %d bytes, was %d", got, sizeAfterFailure)
+	}
 }
 
 // A clean Teardown clears the committed length durably: the committed-length
