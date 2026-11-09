@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/conduitio/conduit-commons/opencdc"
@@ -291,11 +290,12 @@ func TestDestination_ReopenSameInstanceAfterFailedWrite(t *testing.T) {
 	assertWholeRecords(t, path, benchmarkRecord(1), benchmarkRecord(2))
 }
 
-// An Open that fails does not lift the refusal after a failed Write: only an
-// Open that cut the output back to its committed length may. The second Open
-// here comes without a Teardown and fails, so the handles that hold the
-// fragment of the failed batch are still installed.
-func TestDestination_FailedOpenKeepsWriteRefused(t *testing.T) {
+// An Open on a destination that is still open does not lift the refusal after
+// a failed Write: only an Open that cut the output back to its committed
+// length may. The second Open comes without a Teardown and is refused, so the
+// handles that hold the fragment of the failed batch are still installed and
+// must keep refusing.
+func TestDestination_OpenWhileOpenKeepsWriteRefused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.jsonl")
 	fail := false
 	var events []syncEvent
@@ -318,14 +318,13 @@ func TestDestination_FailedOpenKeepsWriteRefused(t *testing.T) {
 	}
 	fail = false
 
-	d.syncDir = func(dir string) error { return &os.PathError{Op: "sync", Path: dir, Err: syscall.EIO} }
-	if err := d.Open(context.Background()); err == nil {
-		t.Fatal("Open = nil, want an error")
+	if err := d.Open(context.Background()); err == nil || !strings.Contains(err.Error(), "already open") {
+		t.Fatalf("Open while open = %v, want the already-open refusal", err)
 	}
 	sizeAfterFailure := len(readFile(t, path))
 	n, err := d.Write(context.Background(), []opencdc.Record{benchmarkRecord(2)})
 	if err == nil || n != 0 || !strings.Contains(err.Error(), "an earlier write failed") {
-		t.Fatalf("Write after a failed Open = (%d, %v), want (0, the earlier-write-failed refusal)", n, err)
+		t.Fatalf("Write after a refused Open = (%d, %v), want (0, the earlier-write-failed refusal)", n, err)
 	}
 	if got := len(readFile(t, path)); got != sizeAfterFailure {
 		t.Fatalf("the refused Write changed the output: %d bytes, was %d", got, sizeAfterFailure)
